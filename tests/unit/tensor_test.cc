@@ -1,9 +1,9 @@
 #include "mini_llama/tensor.h"
 
+#include <gtest/gtest.h>
+
 #include <cmath>
 #include <functional>
-#include <iostream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -16,16 +16,11 @@ using mini_llama::MatmulMode;
 using mini_llama::Tensor;
 
 void Check(bool condition, const std::string& message) {
-  if (!condition) {
-    throw std::runtime_error(message);
-  }
+  EXPECT_TRUE(condition) << message;
 }
 
 void CheckNear(float actual, float expected, float tolerance = 1e-5f) {
-  if (std::fabs(actual - expected) > tolerance) {
-    throw std::runtime_error("expected " + std::to_string(expected) + ", got " +
-                             std::to_string(actual));
-  }
+  EXPECT_NEAR(actual, expected, tolerance);
 }
 
 void CheckTensor(const Tensor& actual, const std::vector<int>& expected_shape,
@@ -38,29 +33,26 @@ void CheckTensor(const Tensor& actual, const std::vector<int>& expected_shape,
 }
 
 void ExpectThrows(const std::function<void()>& operation) {
-  bool thrown = false;
-  try {
-    operation();
-  } catch (const std::exception&) {
-    thrown = true;
-  }
-  Check(thrown, "expected an exception");
+  EXPECT_THROW(operation(), std::exception);
 }
 
 void ExpectThrowsContaining(const std::function<void()>& operation,
                             const std::string& expected_text) {
-  try {
-    operation();
-  } catch (const std::exception& error) {
-    Check(std::string(error.what()).find(expected_text) != std::string::npos,
-          "exception message mismatch");
-    return;
-  }
-  throw std::runtime_error("expected an exception");
+  EXPECT_THROW(
+      {
+        try {
+          operation();
+        } catch (const std::exception& error) {
+          EXPECT_NE(std::string(error.what()).find(expected_text),
+                    std::string::npos);
+          throw;
+        }
+      },
+      std::exception);
 }
 
 // 测试不同秩张量的构造、填充值、元素数量和便捷构造函数。
-void TestTensorConstruction() {
+TEST(TensorTest, Construction) {
   Tensor tensor({2, 3, 4}, 7.0f);
   Check(tensor.shape == std::vector<int>({2, 3, 4}), "shape mismatch");
   Check(tensor.size() == 24 && tensor.num_elements() == 24,
@@ -80,7 +72,7 @@ void TestTensorConstruction() {
 }
 
 // 测试多维索引展开公式，以及 At/At1-At4 的读写一致性。
-void TestTensorIndexing() {
+TEST(TensorTest, Indexing) {
   Tensor tensor({2, 3, 4}, 0.0f);
   Check(tensor.FlatIndex({1, 2, 3}) == 23, "flat index mismatch");
   tensor.At({1, 2, 3}) = 9.0f;
@@ -98,7 +90,7 @@ void TestTensorIndexing() {
 }
 
 // 测试二维行指针访问，并确认 const 访问不会改变数据。
-void TestTensorRowPtr() {
+TEST(TensorTest, RowPtr) {
   Tensor tensor({2, 3}, 0.0f);
   float* row = tensor.RowPtr(1);
   row[0] = 4.0f;
@@ -109,7 +101,7 @@ void TestTensorRowPtr() {
 }
 
 // 测试非法维度、错误秩和越界索引均被明确拒绝。
-void TestTensorValidation() {
+TEST(TensorTest, Validation) {
   ExpectThrows([] { Tensor({0, 2}); });
   ExpectThrows([] { Tensor({-1}); });
   Tensor tensor({2, 3}, 0.0f);
@@ -121,7 +113,7 @@ void TestTensorValidation() {
 }
 
 // 测试 shape 字符串、AssertShape 以及保持元素数量的 ReshapeChecked。
-void TestTensorShapeOperations() {
+TEST(TensorTest, ShapeOperations) {
   Tensor tensor({2, 3}, 0.0f);
   tensor[5] = 5.0f;
   Check(tensor.ShapeStringShort() == "[2, 3]", "shape string mismatch");
@@ -135,7 +127,7 @@ void TestTensorShapeOperations() {
 }
 
 // 测试小矩阵乘法的数值结果，并覆盖四种 dispatch 模式。
-void TestMatmulDispatch() {
+TEST(TensorTest, MatmulDispatch) {
   Tensor a({2, 3}, 0.0f);
   a.data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   Tensor b({3, 2}, 0.0f);
@@ -154,7 +146,7 @@ void TestMatmulDispatch() {
 }
 
 // 测试 Linear 对一维输入和 [1, in_features] 输入的形状及转置权重计算。
-void TestLinear() {
+TEST(TensorTest, Linear) {
   Tensor weight({2, 3}, 0.0f);
   weight.data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   Tensor input({3}, 0.0f);
@@ -170,7 +162,7 @@ void TestLinear() {
 }
 
 // 测试 RMSNorm 的均方根归一化、权重缩放和维度校验。
-void TestRmsNorm() {
+TEST(TensorTest, RmsNorm) {
   Tensor input({2}, 0.0f);
   input.data = {3.0f, 4.0f};
   Tensor weight({2}, 1.0f);
@@ -181,7 +173,7 @@ void TestRmsNorm() {
 }
 
 // 测试带最大值平移的 Softmax，确认概率和为一且不会溢出。
-void TestSoftmax() {
+TEST(TensorTest, Softmax) {
   Tensor input({3}, 0.0f);
   input.data = {1000.0f, 1001.0f, 999.0f};
   Tensor output = mini_llama::Softmax(input);
@@ -195,7 +187,7 @@ void TestSoftmax() {
 }
 
 // 测试 SiLU 的逐元素公式，并保留输入张量形状。
-void TestSilu() {
+TEST(TensorTest, Silu) {
   Tensor input({2}, 0.0f);
   input.data = {-1.0f, 1.0f};
   CheckTensor(mini_llama::Silu(input), {2},
@@ -203,7 +195,7 @@ void TestSilu() {
 }
 
 // 测试逐元素乘法的数值结果和形状不匹配错误。
-void TestElementwiseMul() {
+TEST(TensorTest, ElementwiseMul) {
   Tensor a({2, 2}, 0.0f);
   a.data = {1.0f, 2.0f, 3.0f, 4.0f};
   Tensor b({2, 2}, 2.0f);
@@ -212,7 +204,7 @@ void TestElementwiseMul() {
 }
 
 // 测试 SwiGLU 对每个 gate 元素分别执行 SiLU 后再与 up 相乘。
-void TestSwiGlu() {
+TEST(TensorTest, SwiGlu) {
   Tensor gate({2}, 0.0f);
   gate.data = {-1.0f, 2.0f};
   Tensor up({2}, 3.0f);
@@ -222,7 +214,7 @@ void TestSwiGlu() {
 }
 
 // 测试 ArgMax 返回展平索引，并在并列最大值时保留首次出现的位置。
-void TestArgMax() {
+TEST(TensorTest, ArgMax) {
   Tensor tensor({2, 2}, 0.0f);
   tensor.data = {1.0f, 5.0f, 5.0f, 2.0f};
   Check(mini_llama::ArgMax(tensor) == 1, "ArgMax tie handling mismatch");
@@ -230,34 +222,3 @@ void TestArgMax() {
 }
 
 }  // namespace
-
-int main() {
-  const std::vector<std::pair<const char*, std::function<void()>>> tests = {
-      {"TensorConstruction", TestTensorConstruction},
-      {"TensorIndexing", TestTensorIndexing},
-      {"TensorRowPtr", TestTensorRowPtr},
-      {"TensorValidation", TestTensorValidation},
-      {"TensorShapeOperations", TestTensorShapeOperations},
-      {"MatmulDispatch", TestMatmulDispatch},
-      {"Linear", TestLinear},
-      {"RmsNorm", TestRmsNorm},
-      {"Softmax", TestSoftmax},
-      {"Silu", TestSilu},
-      {"ElementwiseMul", TestElementwiseMul},
-      {"SwiGlu", TestSwiGlu},
-      {"ArgMax", TestArgMax},
-  };
-
-  int failures = 0;
-  for (const auto& test : tests) {
-    try {
-      test.second();
-      std::cout << "[PASS] " << test.first << "\n";
-    } catch (const std::exception& error) {
-      ++failures;
-      std::cerr << "[FAIL] " << test.first << ": " << error.what() << "\n";
-    }
-  }
-  std::cout << tests.size() - failures << "/" << tests.size() << " tests passed\n";
-  return failures == 0 ? 0 : 1;
-}
