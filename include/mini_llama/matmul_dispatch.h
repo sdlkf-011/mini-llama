@@ -1,5 +1,5 @@
-#ifndef INCLUDE_MINI_LLAMA_MATMUL_DISPATCH_H_
-#define INCLUDE_MINI_LLAMA_MATMUL_DISPATCH_H_
+#ifndef MINI_LLAMA_INCLUDE_MINI_LLAMA_MATMUL_DISPATCH_H_
+#define MINI_LLAMA_INCLUDE_MINI_LLAMA_MATMUL_DISPATCH_H_
 
 #include "mini_llama/tensor.h"
 
@@ -26,4 +26,4 @@ Tensor LinearDispatch(const Tensor& x, const Tensor& weight, MatmulMode mode);
 
 }  // namespace mini_llama
 
-#endif  // INCLUDE_MINI_LLAMA_MATMUL_DISPATCH_H_
+#endif  // MINI_LLAMA_INCLUDE_MINI_LLAMA_MATMUL_DISPATCH_H_

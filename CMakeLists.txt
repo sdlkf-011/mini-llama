@@ -13,6 +13,10 @@ add_library(mini_llama_core
   src/tensor.cc
   src/ops.cc
   src/matmul_optimized.cc
+  src/gguf_tokenizer.cc
+  src/json_vocab_tokenizer.cc
+  src/bpe_tokenizer.cc
+  src/tokenizer.cc
 )
 
 target_include_directories(mini_llama_core
@@ -20,17 +24,9 @@ target_include_directories(mini_llama_core
     ${PROJECT_SOURCE_DIR}/include
 )
 
-# 模块测试
-file(GLOB UNIT_TEST_SOURCES
-  CONFIGURE_DEPENDS
-  ${PROJECT_SOURCE_DIR}/tests/unit/*.cc
-)
+# 测试模块
+include(CTest)
 
-add_executable(mini-llama-tests
-  ${UNIT_TEST_SOURCES}
-)
-
-target_link_libraries(mini-llama-tests
-  PRIVATE
-    mini_llama_core
-)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
