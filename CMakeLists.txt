@@ -13,6 +13,12 @@ add_library(mini_llama_core
   src/tensor.cc
   src/ops.cc
   src/matmul_optimized.cc
+  src/context.cc
+  src/kv_cache.cc
+  src/batch.cc
+  src/forward.cc
+  src/request_context.cc
+  src/radix_tree.cc
 )
 
 target_include_directories(mini_llama_core
