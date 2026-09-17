@@ -68,11 +68,5 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# DOCS
-docs/
-!docs/
-docs/*
-!docs/tensor_ops_implementation.md
-
 # Codex
 .codex
