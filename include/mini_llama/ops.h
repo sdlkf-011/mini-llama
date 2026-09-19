@@ -1,6 +1,7 @@
 #ifndef MINI_LLAMA_INCLUDE_MINI_LLAMA_OPS_H_
 #define MINI_LLAMA_INCLUDE_MINI_LLAMA_OPS_H_
 
+#include "mini_llama/model.h"
 #include "tensor.h"
 
 namespace mini_llama {
@@ -31,6 +32,12 @@ Tensor ElementwiseMul(const Tensor& a, const Tensor& b);
 
 // SwiGLU：SwiGlu(gate, up) = Silu(gate) * up
 Tensor SwiGlu(const Tensor& gate, const Tensor& up);
+
+// RoPE（旋转位置编码）应用于 Q 和 k
+// q: [n_heads, head_dim]，k: [n_kv_heads, head_dim]
+// pos: 当前 token 的位置
+void Rope(Tensor& q, Tensor& k, int pos, float theta,
+          RopeType rope_type = RopeType::kNormal);
 
 // Argmax：返回最大值的 FlatIndex
 int ArgMax(const Tensor& x);

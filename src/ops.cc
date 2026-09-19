@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "mini_llama/matmul_dispatch.h"
+#include "mini_llama/model.h"
 #include "mini_llama/tensor.h"
 
 namespace mini_llama {
@@ -114,6 +115,90 @@ Tensor SwiGlu(const Tensor& gate, const Tensor& up) {
   }
 
   return y;
+}
+
+static void ApplyRopeNormalToHeads(Tensor& x, int pos, float theta) {
+  int n_heads = x.shape[0];
+  int head_dim = x.shape[1];
+
+  for (int h = 0; h < n_heads; ++h) {
+    for (int i = 0; i < head_dim; i += 2) {
+      float freq = 1.0f / std::pow(theta, static_cast<float>(i) /
+                                              static_cast<float>(head_dim));
+
+      // 计算旋转角度
+      float cos_val = std::cos(pos * freq);
+      float sin_val = std::sin(pos * freq);
+
+      // 取出需要旋转的元素
+      float x0 = x.data[h * head_dim + i];
+      float x1 = x.data[h * head_dim + i + 1];
+
+      // 执行二维旋转
+      x.data[h * head_dim + i] = x0 * cos_val - x1 * sin_val;
+      x.data[h * head_dim + i + 1] = x0 * sin_val + x1 * cos_val;
+    }
+  }
+}
+
+static void ApplyRopeNeoXToHeads(Tensor& x, int pos, float theta) {
+  int n_heads = x.shape[0];
+  int head_dim = x.shape[1];
+  int half_dim = head_dim / 2;
+
+  for (int h = 0; h < n_heads; ++h) {
+    int base = h * head_dim;
+    for (int i = 0; i < half_dim; ++i) {
+      float freq = 1.0f / std::pow(theta, static_cast<float>(2 * i) /
+                                              static_cast<float>(head_dim));
+
+      // 计算旋转角度
+      float cos_val = std::cos(pos * freq);
+      float sin_val = std::sin(pos * freq);
+
+      // 取出要旋转的元素
+      float x0 = x.data[base + i];
+      float x1 = x.data[base + half_dim + i];
+
+      // 执行二维旋转
+      x.data[base + i] = x0 * cos_val - x1 * sin_val;
+      x.data[base + half_dim + i] = x0 * sin_val + x1 * cos_val;
+    }
+  }
+}
+
+void Rope(Tensor& q, Tensor& k, int pos, float theta, RopeType rope_type) {
+  // q: [n_heads, head_dim], k: [n_kv_heads, head_dim]
+  if (q.num_dims() != 2 || k.num_dims() != 2) {
+    throw std::runtime_error("Rope: expected 2D tensors");
+  }
+  if (pos < 0) {
+    throw std::out_of_range("Rope: position must be non-negative");
+  }
+  if (!std::isfinite(theta) || theta <= 0.0f) {
+    throw std::runtime_error("Rope: theta must be finite and positive");
+  }
+
+  int n_heads = q.shape[0];
+  int head_dim = q.shape[1];
+  int n_kv_heads = k.shape[0];
+  int k_head_dim = k.shape[1];
+  if (head_dim != k_head_dim) {
+    throw std::runtime_error("Rope: q and k head_dim mismatch " +
+                             q.ShapeStringShort() + " vs " + k.ShapeStringShort());
+  }
+  if (head_dim <= 0 || head_dim % 2 != 0) {
+    throw std::runtime_error("Rope: head_dim must be positive and even, got " +
+                             std::to_string(head_dim));
+  }
+
+  if (rope_type == RopeType::kNeoX) {
+    ApplyRopeNeoXToHeads(q, pos, theta);
+    ApplyRopeNeoXToHeads(k, pos, theta);
+  } else {
+    ApplyRopeNormalToHeads(q, pos, theta);
+    ApplyRopeNormalToHeads(k, pos, theta);
+  }
 }
 
 int ArgMax(const Tensor& x) {

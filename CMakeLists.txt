@@ -17,6 +17,12 @@ add_library(mini_llama_core
   src/json_vocab_tokenizer.cc
   src/bpe_tokenizer.cc
   src/tokenizer.cc
+  src/context.cc
+  src/kv_cache.cc
+  src/batch.cc
+  src/forward.cc
+  src/request_context.cc
+  src/radix_tree.cc
 )
 
 target_include_directories(mini_llama_core
