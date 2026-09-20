@@ -23,6 +23,8 @@ add_library(mini_llama_core
   src/forward.cc
   src/request_context.cc
   src/radix_tree.cc
+  src/sampler.cc
+  src/main.cc
 )
 
 target_include_directories(mini_llama_core

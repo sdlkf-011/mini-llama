@@ -2,7 +2,7 @@
 #define MINI_LLAMA_INCLUDE_MINI_LLAMA_OPS_H_
 
 #include "mini_llama/model.h"
-#include "tensor.h"
+#include "mini_llama/tensor.h"
 
 namespace mini_llama {
 
