@@ -132,6 +132,7 @@ std::string Generate(const MiniLlamaModel& model, const ITokenizer& tokenizer,
     }
     tokens.push_back(tokenizer.bos_id());
   }
+
   if (model.config.max_seq_len <= 0 ||
       tokens.size() > static_cast<size_t>(model.config.max_seq_len)) {
     throw std::invalid_argument("prompt exceeds model context length");
@@ -141,16 +142,28 @@ std::string Generate(const MiniLlamaModel& model, const ITokenizer& tokenizer,
   Tensor logits = ForwardBatch(context, model, MiniBatch::FromTokens(tokens));
   MiniSampler sampler(sampling);
   std::string result;
+
   for (int generated = 0; generated < max_tokens; ++generated) {
+    const int next_pos = context.pos + 1;
+    // 采样前确认下一个 token 是否有可用上下文
+    if (next_pos >= model.config.max_seq_len) {
+      break;
+    }
+
     const int token = sampler.Sample(logits, sampling);
+
     if (token == tokenizer.eos_id()) {
       break;
     }
+
     result += tokenizer.DecodeToken(token);
-    if (generated + 1 == max_tokens || context.pos + 1 >= model.config.max_seq_len) {
+
+    // 如已经达到生成的上限，不在进行下一轮次的 logits
+    if (generated + 1 >= max_tokens) {
       break;
     }
-    logits = ForwardBatch(context, model, MiniBatch::Single(token, context.pos + 1));
+
+    logits = ForwardBatch(context, model, MiniBatch::Single(token, next_pos));
   }
   return result;
 }
@@ -165,6 +178,7 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
                 "[--temperature FLOAT] [--top-k N] [--seed N]\n";
       return 0;
     }
+
     int option_start = 1;
     if (argc > option_start && (std::string(argv[option_start]) == "generate" ||
                                 std::string(argv[option_start]) == "run")) {
@@ -175,6 +189,7 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
                 "[--temperature FLOAT] [--top-k N] [--seed N]\n";
       return 0;
     }
+
     const GenerateOptions options =
         ParseGenerateOptions(argc - option_start, argv + option_start);
     output << Generate(model, tokenizer, options.prompt, options.max_tokens,
