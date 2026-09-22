@@ -28,6 +28,7 @@ endfunction()
 
 add_unit_test(mini-llama-tensor-tests unit/tensor_test.cc)
 add_unit_test(mini-llama-tokenizer-tests unit/tokenizer_test.cc)
+add_unit_test(mini-llama-gguf-tokenizer-tests unit/gguf_tokenizer_test.cc)
 add_unit_test(mini-llama-kv-cache-tests unit/kv_cache_test.cc)
 add_unit_test(mini-llama-radix-tree-tests unit/radix_tree_test.cc)
 add_unit_test(mini-llama-chat-tests unit/chat_test.cc)

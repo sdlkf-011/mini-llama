@@ -25,6 +25,9 @@ add_library(mini_llama_core
   src/radix_tree.cc
   src/sampler.cc
   src/main.cc
+  src/chat.cc
+  src/prompt_builder.cc
+  src/terminal.cc
 )
 
 target_include_directories(mini_llama_core
