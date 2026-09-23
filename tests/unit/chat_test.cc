@@ -207,4 +207,24 @@ TEST(ChatTest, RunModeStreamsAndFlushesGeneratedTokens) {
   EXPECT_GE(buffer.flush_count, 3);
 }
 
+// 测试目的：prompt 恰好占满上下文时应在 prefill 前拒绝该轮输入，
+// 不输出空的 assistant 回复，也不把失败轮次计入会话统计。
+TEST(ChatTest, RunModeRejectsPromptThatFillsContext) {
+  MiniLlamaModel model = MakeTestModel();
+  model.config.max_seq_len = 1;
+  FixedTokenizer tokenizer;
+  std::istringstream input("hello\n/stats\n/exit\n");
+  std::ostringstream output;
+  std::ostringstream error;
+  const char* argv[] = {"mini-llama", "run", "--max-tokens", "1"};
+
+  EXPECT_EQ(mini_llama::Run(4, argv, model, tokenizer, input, output, error), 0);
+  EXPECT_TRUE(error.str().empty());
+  EXPECT_NE(output.str().find("prompt must be shorter than model context length"),
+            std::string::npos);
+  EXPECT_NE(output.str().find("Prompt tokens: 0"), std::string::npos);
+  EXPECT_NE(output.str().find("Generated tokens: 0"), std::string::npos);
+  EXPECT_EQ(output.str().find("assistant >"), std::string::npos);
+}
+
 }  // namespace

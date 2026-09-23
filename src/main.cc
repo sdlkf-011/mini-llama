@@ -153,8 +153,8 @@ std::vector<int> EncodePrompt(const MiniLlamaModel& model,
   }
 
   if (model.config.max_seq_len <= 0 ||
-      tokens.size() > static_cast<size_t>(model.config.max_seq_len)) {
-    throw std::invalid_argument("prompt exceeds model context length");
+      tokens.size() >= static_cast<size_t>(model.config.max_seq_len)) {
+    throw std::invalid_argument("prompt must be shorter than model context length");
   }
   return tokens;
 }
