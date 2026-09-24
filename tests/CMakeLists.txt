@@ -10,6 +10,12 @@ if(NOT GTest_FOUND)
   FetchContent_MakeAvailable(googletest)
 endif()
 
+foreach(google_test_target IN ITEMS gtest gtest_main gmock gmock_main)
+  if(TARGET ${google_test_target})
+    set_property(TARGET ${google_test_target} PROPERTY EXPORT_COMPILE_COMMANDS OFF)
+  endif()
+endforeach()
+
 include(GoogleTest)
 
 function(add_unit_test test_name test_source)
@@ -35,3 +41,9 @@ add_unit_test(mini-llama-chat-tests unit/chat_test.cc)
 add_unit_test(mini-llama-request-context-tests unit/request_context_test.cc)
 add_unit_test(mini-llama-forward-tests unit/forward_test.cc)
 add_unit_test(mini-llama-sampler-tests unit/sampler_test.cc)
+add_unit_test(mini-llama-loader-tests unit/loader_test.cc)
+
+target_compile_definitions(mini-llama-loader-tests
+  PRIVATE
+    MINI_LLAMA_TEST_MODEL_DIR="${PROJECT_SOURCE_DIR}/models/tiny"
+)
