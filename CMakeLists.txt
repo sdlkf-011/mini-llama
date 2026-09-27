@@ -29,6 +29,7 @@ add_library(mini_llama_core
   src/prompt_builder.cc
   src/terminal.cc
   src/loader.cc
+  src/gguf.cc
 )
 
 target_include_directories(mini_llama_core

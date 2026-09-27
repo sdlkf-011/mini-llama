@@ -148,7 +148,7 @@ TEST(LoaderTest, RejectsTrailingWeightBytes) {
   const mini_llama::MiniLlamaModel model = LoadModel(
       (kModelDirectory / "model.json").string(), weights_file.path().string());
   EXPECT_FALSE(model.loaded);
-  EXPECT_NE(model.load_error.find("尾随字节"), std::string::npos);
+  EXPECT_NE(model.load_error.find("trailing bytes"), std::string::npos);
 }
 
 }  // namespace

@@ -140,7 +140,7 @@ class JsonReader {
       if (position_ >= text_.size()) {
         return false;
       }
-      
+
       const char escape = text_[position_++];
       switch (escape) {
         case '"':
