@@ -42,6 +42,12 @@ add_unit_test(mini-llama-request-context-tests unit/request_context_test.cc)
 add_unit_test(mini-llama-forward-tests unit/forward_test.cc)
 add_unit_test(mini-llama-sampler-tests unit/sampler_test.cc)
 add_unit_test(mini-llama-loader-tests unit/loader_test.cc)
+add_unit_test(mini-llama-gguf-tests gguf_test.cc)
+
+target_compile_definitions(mini-llama-gguf-tests
+  PRIVATE
+    MINI_LLAMA_TEST_MODEL_DIR="${PROJECT_SOURCE_DIR}/models/tiny"
+)
 
 target_compile_definitions(mini-llama-loader-tests
   PRIVATE
