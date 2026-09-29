@@ -9,6 +9,7 @@
 #include "mini_llama/batch.h"
 #include "mini_llama/context.h"
 #include "mini_llama/model.h"
+#include "mini_llama/quant.h"
 #include "mini_llama/tensor.h"
 
 namespace {
@@ -39,20 +40,30 @@ MiniLlamaModel MakeTestModel() {
   model.layers.resize(1);
   auto& layer = model.layers[0];
   layer.attention_norm = Tensor({2}, 1.0f);
-  layer.wq = Tensor({2, 2}, 0.0f);
-  layer.wq.data = {1.0f, 0.0f, 0.0f, 1.0f};
+  // 测试模型仍使用精确 F32 数值，但通过 kF32 分支匹配生产模型的权重类型。
+  layer.wq = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
+  layer.wq.f32_data = {1.0f, 0.0f, 0.0f, 1.0f};
   layer.wk = layer.wq;
   layer.wv = layer.wq;
   layer.wo = layer.wq;
   layer.ffn_norm = Tensor({2}, 1.0f);
-  layer.w_gate = Tensor({2, 2}, 0.0f);
-  layer.w_up = Tensor({2, 2}, 0.0f);
-  layer.w_down = Tensor({2, 2}, 0.0f);
+  layer.w_gate = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
+  layer.w_up = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
+  layer.w_down = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
 
   model.final_norm = Tensor({2}, 1.0f);
-  model.lm_head = Tensor({3, 2}, 0.0f);
-  model.lm_head.data = {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+  model.lm_head = mini_llama::ToQuantizedTensor(Tensor({3, 2}, 0.0f));
+  model.lm_head.f32_data = {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
   return model;
+}
+
+mini_llama::QuantizedTensor ConvertToQ80(const mini_llama::QuantizedTensor& weight) {
+  const Tensor dense = mini_llama::ToTensor(weight);
+  mini_llama::QuantizedTensor quantized;
+  quantized.type = mini_llama::QuantType::kQ80;
+  quantized.shape = dense.shape;
+  quantized.q8_0_data = mini_llama::QuantizeToQ80(dense);
+  return quantized;
 }
 
 void ExpectTensorNear(const Tensor& actual, const Tensor& expected,
@@ -79,6 +90,29 @@ TEST(ForwardTest, ForwardTokenProducesLogitsAndWritesKvCache) {
   EXPECT_NEAR(logits.data[2], 7.0f * inverse_rms, 1e-5f);
   EXPECT_NEAR(context.kv_cache.KeyPtr(0, 0, 0)[0], 3.0f * inverse_rms, 1e-5f);
   EXPECT_NEAR(context.kv_cache.valuePtr(0, 0, 0)[1], 4.0f * inverse_rms, 1e-5f);
+}
+
+// 量化模型必须走块级 Linear 完成整条前向，不能回退到 ToTensor 展开权重。
+TEST(ForwardTest, ForwardTokenSupportsQ80Weights) {
+  MiniLlamaModel dense_model = MakeTestModel();
+  MiniLlamaModel quantized_model = dense_model;
+  auto& layer = quantized_model.layers[0];
+  layer.wq = ConvertToQ80(layer.wq);
+  layer.wk = ConvertToQ80(layer.wk);
+  layer.wv = ConvertToQ80(layer.wv);
+  layer.wo = ConvertToQ80(layer.wo);
+  layer.w_gate = ConvertToQ80(layer.w_gate);
+  layer.w_up = ConvertToQ80(layer.w_up);
+  layer.w_down = ConvertToQ80(layer.w_down);
+  quantized_model.lm_head = ConvertToQ80(quantized_model.lm_head);
+
+  MiniLlamaContext dense_context(&dense_model);
+  MiniLlamaContext quantized_context(&quantized_model);
+  const Tensor dense_logits = ForwardToken(dense_context, dense_model, 0);
+  const Tensor quantized_logits =
+      ForwardToken(quantized_context, quantized_model, 0);
+
+  ExpectTensorNear(quantized_logits, dense_logits, 2e-3f);
 }
 
 // 测试 ForwardToken 只使用调用方指定的位置，不推进 ctx.pos，也不修改由
@@ -141,7 +175,8 @@ TEST(ForwardTest, RejectsInvalidModelTokenPositionAndWeights) {
   EXPECT_THROW(ForwardToken(context, model, 0), std::out_of_range);
   context.pos = 0;
 
-  model.layers[0].wq = Tensor({1, 2}, 0.0f);
+  // 即使存储类型改为 QuantizedTensor，错误逻辑 shape 仍必须在前向前被拒绝。
+  model.layers[0].wq = mini_llama::ToQuantizedTensor(Tensor({1, 2}, 0.0f));
   EXPECT_THROW(ForwardToken(context, model, 0), std::runtime_error);
 }
 

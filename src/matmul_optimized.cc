@@ -7,21 +7,21 @@
 namespace mini_llama {
 
 // ----------------------------------------
-// 朴素实现(三层循环)[为确保可读性和回退而保留]
+// Naive implementations（当前正确性基线）
 // ----------------------------------------
 
-// matmul:标准矩阵乘法
+// 按行主序计算标准二维矩阵乘法 [m, k] x [k, n]
 static Tensor MatmulNaive(const Tensor& a, const Tensor& b) {
   int m = a.shape[0];
   int inner_dim = a.shape[1];
   int n = b.shape[1];
-
   Tensor c({m, n}, 0.0f);
   for (int i = 0; i < m; ++i) {
     for (int j = 0; j < n; ++j) {
       float sum = 0.0f;
+      // B 的同一列在行主序存储中不连续，因此按行跨度读取
       for (int k = 0; k < inner_dim; ++k) {
-        sum += a.data[i * inner_dim + k] * b.data[n * k + j];
+        sum += a.data[i * inner_dim + k] * b.data[k * n + j];
       }
       c.data[i * n + j] = sum;
     }
@@ -29,17 +29,18 @@ static Tensor MatmulNaive(const Tensor& a, const Tensor& b) {
   return c;
 }
 
-// 线性层计算
+// 计算 F32 Linear 的 x @ weight^T，并保持输入张量的秩
 static Tensor LinearNaive(const Tensor& x, const Tensor& weight) {
   int in_features = weight.shape[1];   // 输入特征量
   int out_features = weight.shape[0];  // 输出特征量
   bool is_1d = (x.num_dims() == 1);
 
   Tensor result(
-      (is_1d ? std::vector<int>{out_features} : std::vector<int>{1, out_features}),
+      is_1d ? std::vector<int>{out_features} : std::vector<int>{1, out_features},
       0.0f);
   for (int j = 0; j < out_features; ++j) {
     float sum = 0.0f;
+    // weight 的每一行对应一个输出特征，行内数据连续
     for (int k = 0; k < in_features; ++k) {
       sum += x.data[k] * weight.data[j * in_features + k];
     }
@@ -48,23 +49,30 @@ static Tensor LinearNaive(const Tensor& x, const Tensor& weight) {
   return result;
 }
 
+// ----------------------------------------
+// Dispatch
+// ----------------------------------------
+
+// 当前只有朴素后端完整可用，因此默认选择该模式
 MatmulMode DefaultMatmulMode() { return MatmulMode::kNaive; }
 
+// 校验输入矩阵，并将请求分发到已实现的矩阵乘后端。
 Tensor MatmulDispatch(const Tensor& a, const Tensor& b, MatmulMode mode) {
-  (void)mode;
   if (a.num_dims() != 2 || b.num_dims() != 2) {
     throw std::runtime_error("MatmulDispatch: expected 2D tensors");
   }
   if (a.shape[1] != b.shape[0]) {
     throw std::runtime_error("MatmulDispatch: dimension mismatch");
   }
-
-  return MatmulNaive(a, b);
+  switch (mode) {
+    case MatmulMode::kNaive:
+      return MatmulNaive(a, b);
+  }
+  throw std::runtime_error("MatmulDispatch: unsupported matmul mode");
 }
 
+// 校验 F32 Linear 的 shape，并将请求分发到已实现的后端
 Tensor LinearDispatch(const Tensor& x, const Tensor& weight, MatmulMode mode) {
-  (void)mode;
-  // 校验 weight 必须是二维
   if (weight.num_dims() != 2) {
     throw std::runtime_error(
         "LinearDispatch: expected weight shape [out_features, in_features]");
@@ -80,13 +88,14 @@ Tensor LinearDispatch(const Tensor& x, const Tensor& weight, MatmulMode mode) {
     throw std::runtime_error(
         "LinearDispatch: expected x shape [in_features] or [1, in_features]");
   }
-
-  // 输入特征量与权重维度是否匹配
   if (weight.shape[1] != in_features) {
     throw std::runtime_error("LinearDispatch: dimension mismatch");
   }
-
-  return LinearNaive(x, weight);
+  switch (mode) {
+    case MatmulMode::kNaive:
+      return LinearNaive(x, weight);
+  }
+  throw std::runtime_error("LinearDispatch: unsupported matmul mode");
 }
 
 }  // namespace mini_llama

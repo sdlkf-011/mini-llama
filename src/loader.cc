@@ -734,23 +734,30 @@ MiniLlamaModel LoadModel(const std::string& config_path,
 
       layer_weights.attention_norm =
           LoadTensorByName(weights_file, tensor_map, prefix + "attention_norm");
-      layer_weights.wq = LoadTensorByName(weights_file, tensor_map, prefix + "wq");
-      layer_weights.wk = LoadTensorByName(weights_file, tensor_map, prefix + "wk");
-      layer_weights.wv = LoadTensorByName(weights_file, tensor_map, prefix + "wv");
-      layer_weights.wo = LoadTensorByName(weights_file, tensor_map, prefix + "wo");
+      // 旧版 model.bin 固定保存 F32；包装为 kF32 后与 GGUF 量化权重共用模型接口。
+      layer_weights.wq = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "wq"));
+      layer_weights.wk = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "wk"));
+      layer_weights.wv = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "wv"));
+      layer_weights.wo = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "wo"));
       layer_weights.ffn_norm =
           LoadTensorByName(weights_file, tensor_map, prefix + "ffn_norm");
-      layer_weights.w_gate =
-          LoadTensorByName(weights_file, tensor_map, prefix + "w_gate");
-      layer_weights.w_up =
-          LoadTensorByName(weights_file, tensor_map, prefix + "w_up");
-      layer_weights.w_down =
-          LoadTensorByName(weights_file, tensor_map, prefix + "w_down");
+      layer_weights.w_gate = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "w_gate"));
+      layer_weights.w_up = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "w_up"));
+      layer_weights.w_down = ToQuantizedTensor(
+          LoadTensorByName(weights_file, tensor_map, prefix + "w_down"));
     }
 
     // 模型末尾是最终归一化参数和词表输出头
     model.final_norm = LoadTensorByName(weights_file, tensor_map, "final_norm");
-    model.lm_head = LoadTensorByName(weights_file, tensor_map, "lm_head");
+    // lm_head 属于 Linear 权重，因此同样使用 QuantizedTensor 的 F32 分支。
+    model.lm_head =
+        ToQuantizedTensor(LoadTensorByName(weights_file, tensor_map, "lm_head"));
   } catch (const std::exception& error) {
     return LoadFailure(error.what());
   }

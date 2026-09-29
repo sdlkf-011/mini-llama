@@ -1,9 +1,11 @@
 #ifndef MINI_LLAMA_INCLUDE_MINI_LLAMA_MODEL_H_
 #define MINI_LLAMA_INCLUDE_MINI_LLAMA_MODEL_H_
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
+#include "mini_llama/quantized_tensor.h"
 #include "mini_llama/tensor.h"
 
 namespace mini_llama {
@@ -29,20 +31,20 @@ struct ModelConfig {
   RopeType rope_type = RopeType::kNormal;
 };
 
-// 单个 Transformer 层的 CPU F32 权重。线性权重保持 [out, in] 排列。
+// 单个 Transformer 层的 CPU 权重。线性权重保持 [out, in] 排列并保留量化格式
 struct LayerWeights {
-  Tensor attention_norm;  // [dim] F32，注意力子层的 RMSNorm 缩放权重
-  Tensor wq;              // [n_heads * head_dim, dim] F32，查询投影权重
-  Tensor wk;              // [n_kv_heads * head_dim, dim] F32，键投影权重
-  Tensor wv;              // [n_kv_heads * head_dim, dim] F32，值投影权重
-  Tensor wo;              // [dim, n_heads * head_dim] F32，输出投影权重
-  Tensor bq;              // 可选 [n_heads * head_dim] F32，查询投影偏置
-  Tensor bk;              // 可选 [n_kv_heads * head_dim] F32，键投影偏置
-  Tensor bv;              // 可选 [n_kv_heads * head_dim] F32，值投影偏置
-  Tensor ffn_norm;        // [dim] F32，前馈网络子层的 RMSNorm 缩放权重
-  Tensor w_gate;          // [hidden_dim, dim] F32，SwiGLU 门控投影权重
-  Tensor w_up;            // [hidden_dim, dim] F32，SwiGLU 上投影权重
-  Tensor w_down;          // [dim, hidden_dim] F32，前馈网络下投影权重
+  Tensor attention_norm;   // [dim] F32，注意力子层的 RMSNorm 缩放权重
+  QuantizedTensor wq;      // [n_heads * head_dim, dim] F32/Q8_0/Q4_0/Q4_1
+  QuantizedTensor wk;      // [n_kv_heads * head_dim, dim]，键投影权重
+  QuantizedTensor wv;      // [n_kv_heads * head_dim, dim]，值投影权重
+  Tensor bq;               // 可选 [n_heads * head_dim] F32，查询投影偏置
+  Tensor bk;               // 可选 [n_kv_heads * head_dim] F32，键投影偏置
+  Tensor bv;               // 可选 [n_kv_heads * head_dim] F32，值投影偏置
+  QuantizedTensor wo;      // [dim, n_heads * head_dim]，注意力输出投影权重
+  Tensor ffn_norm;         // [dim] F32，前馈子层的 RMSNorm 缩放权重
+  QuantizedTensor w_gate;  // [hidden_dim, dim]，SwiGLU 门控投影权重
+  QuantizedTensor w_up;    // [hidden_dim, dim]，SwiGLU 上投影权重
+  QuantizedTensor w_down;  // [dim, hidden_dim]，SwiGLU 下投影权重
 };
 
 // 完整模型对象。只有 loaded 为 true 时，其配置与权重才可用于前向计算
@@ -53,8 +55,14 @@ struct MiniLlamaModel {
   Tensor token_embedding;            // [vocab_size, dim] F32，词元嵌入表
   std::vector<LayerWeights> layers;  // [n_layers]，各 Transformer 层权重
   Tensor final_norm;                 // [dim] F32，最终 RMSNorm 缩放权重
-  Tensor lm_head;                    // [vocab_size, dim] F32，词表投影权重
+  QuantizedTensor lm_head;           // [vocab_size, dim]，词表输出投影权重
 };
+
+// 返回模型权重以当前格式存储时占用的数据字节数
+size_t ModelWeightBytes(const MiniLlamaModel& model);
+
+// 返回相同模型权重全部以 F32 存储时需要的数据字节数
+size_t ModelWeightBytesF32(const MiniLlamaModel& model);
 
 }  // namespace mini_llama
 
