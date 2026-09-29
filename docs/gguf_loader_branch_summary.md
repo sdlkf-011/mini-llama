@@ -238,15 +238,18 @@ head_dim 64、词表 151936），创建 GGUF tokenizer，执行真实 24 层 CPU
 
 - 只支持 GGUF Reader 已覆盖的 GGUF v3 和 F32、F16、Q8_0、Q4_0、Q4_1。
 - 不支持 Q4_K、Q5_K、Q6_K、IQ 等扩展量化格式。
-- 量化权重在加载时全部展开为 F32，尚未保留模型原生量化存储。
-- 省略 `output.weight` 时会复制 F32 embedding 作为 `lm_head`，增加内存占用。
+- Linear 权重保留 Q8_0/Q4_0/Q4_1 块，并在 CPU 前向中逐块即时计算，
+  不再分配完整的临时 F32 权重矩阵。
+- `token_embedding` 目前仍转换为 F32；省略 `output.weight` 时还会复制该
+  embedding 作为 `lm_head`，这部分内存仍需后续改为按行解码与共享存储。
 - 当前张量映射面向已有 Llama/Qwen2 风格 `LayerWeights`，未知扩展张量会忽略。
 - Qwen2 的 NeoX RoPE 语义已接入；更多架构需要补充对应的 RoPE/模型语义。
 - 模型文件必须是真实 GGUF；Git LFS pointer 文本不能用于解析或生成。
-- 本分支没有新增进程级 CLI 源码，也没有改变 tokenizer、Forward 或 Sampler。
+- 量化 Linear 当前是标量正确性实现，尚未接入 SIMD 或线程池优化。
+- 本分支没有新增进程级 CLI 源码，也没有改变 tokenizer 或 Sampler。
 
 ## 一句话总结
 
 本分支完成了从 GGUF Reader 到 `MiniLlamaModel` 的关键桥接：动态读取模型配置，
-映射并解码 Llama/Qwen2 风格权重，严格校验后生成可直接进入现有 CPU 前向和
-生成链路的 F32 模型对象，并已使用真实 Qwen2-0.5B Q8_0 模型验证。
+映射 Llama/Qwen2 风格权重，保留线性层量化块并接入 CPU 前向，已使用真实
+Qwen2-0.5B Q8_0 模型验证首 token logits 输出。

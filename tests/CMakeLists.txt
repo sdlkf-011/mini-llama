@@ -43,6 +43,7 @@ add_unit_test(mini-llama-forward-tests unit/forward_test.cc)
 add_unit_test(mini-llama-sampler-tests unit/sampler_test.cc)
 add_unit_test(mini-llama-loader-tests unit/loader_test.cc)
 add_unit_test(mini-llama-gguf-tests gguf_test.cc)
+add_unit_test(mini-llama-quant-tests unit/quant_test.cc)
 
 target_compile_definitions(mini-llama-gguf-tests
   PRIVATE

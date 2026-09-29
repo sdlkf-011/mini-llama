@@ -6,10 +6,7 @@
 namespace mini_llama {
 
 enum class MatmulMode {
-  kNaive,         // 朴素三层循环，正确性基线
-  kThreaded,      // 多线程实现
-  kSimd,          // 单指令多数据实现
-  kThreadedSimd,  // 多线程与 SIMD 结合
+  kNaive,  // 朴素三层循环，正确性基线
 };
 
 // 主推理路径使用的默认模式

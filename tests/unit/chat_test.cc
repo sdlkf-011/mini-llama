@@ -79,18 +79,19 @@ MiniLlamaModel MakeTestModel() {
   model.layers.resize(1);
   auto& layer = model.layers[0];
   layer.attention_norm = Tensor({2}, 1.0f);
-  layer.wq = Tensor({2, 2}, 0.0f);
-  layer.wq.data = {1.0f, 0.0f, 0.0f, 1.0f};
+  // 测试模型仍使用精确 F32 数值，但通过 kF32 分支匹配生产模型的权重类型。
+  layer.wq = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
+  layer.wq.f32_data = {1.0f, 0.0f, 0.0f, 1.0f};
   layer.wk = layer.wq;
   layer.wv = layer.wq;
   layer.wo = layer.wq;
   layer.ffn_norm = Tensor({2}, 1.0f);
-  layer.w_gate = Tensor({2, 2}, 0.0f);
-  layer.w_up = Tensor({2, 2}, 0.0f);
-  layer.w_down = Tensor({2, 2}, 0.0f);
+  layer.w_gate = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
+  layer.w_up = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
+  layer.w_down = mini_llama::ToQuantizedTensor(Tensor({2, 2}, 0.0f));
   model.final_norm = Tensor({2}, 1.0f);
-  model.lm_head = Tensor({3, 2}, 0.0f);
-  model.lm_head.data = {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
+  model.lm_head = mini_llama::ToQuantizedTensor(Tensor({3, 2}, 0.0f));
+  model.lm_head.f32_data = {1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f};
   return model;
 }
 
