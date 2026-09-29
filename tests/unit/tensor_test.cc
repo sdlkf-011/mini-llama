@@ -126,23 +126,24 @@ TEST(TensorTest, ShapeOperations) {
   ExpectThrows([&] { tensor.ReshapeChecked({4, 2}, "ShapeTest"); });
 }
 
-// 测试小矩阵乘法的数值结果，并覆盖四种 dispatch 模式。
+// 测试小矩阵乘法的数值结果，并覆盖当前已实现的朴素 dispatch 模式。
 TEST(TensorTest, MatmulDispatch) {
   Tensor a({2, 3}, 0.0f);
   a.data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   Tensor b({3, 2}, 0.0f);
   b.data = {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
   const std::vector<float> expected = {58.0f, 64.0f, 139.0f, 154.0f};
-  for (MatmulMode mode : {MatmulMode::kNaive, MatmulMode::kThreaded,
-                          MatmulMode::kSimd, MatmulMode::kThreadedSimd}) {
-    CheckTensor(mini_llama::MatmulDispatch(a, b, mode), {2, 2}, expected);
-  }
+  CheckTensor(mini_llama::MatmulDispatch(a, b, MatmulMode::kNaive), {2, 2},
+              expected);
   CheckTensor(mini_llama::Matmul(a, b), {2, 2}, expected);
   ExpectThrows([&] {
     mini_llama::MatmulDispatch(Tensor({2, 3}), Tensor({2, 2}), MatmulMode::kNaive);
   });
   ExpectThrows(
       [&] { mini_llama::MatmulDispatch(Tensor({3}), b, MatmulMode::kNaive); });
+  // 未登记的枚举值必须被拒绝，不能静默回退到某个实现。
+  ExpectThrows(
+      [&] { mini_llama::MatmulDispatch(a, b, static_cast<MatmulMode>(-1)); });
 }
 
 // 测试 Linear 对一维输入和 [1, in_features] 输入的形状及转置权重计算。
@@ -157,6 +158,9 @@ TEST(TensorTest, Linear) {
   batched.data = input.data;
   CheckTensor(mini_llama::LinearDispatch(batched, weight, MatmulMode::kNaive),
               {1, 2}, {14.0f, 32.0f});
+  ExpectThrows([&] {
+    mini_llama::LinearDispatch(input, weight, static_cast<MatmulMode>(-1));
+  });
   ExpectThrows([&] { mini_llama::Linear(input, Tensor({3})); });
   ExpectThrows([&] { mini_llama::Linear(Tensor({2, 3}), weight); });
 }

@@ -31,6 +31,9 @@ add_library(mini_llama_core
   src/loader.cc
   src/gguf.cc
   src/gguf_loader.cc
+  src/quantized_tensor.cc
+  src/quant.cc
+  src/model.cc
 )
 
 target_include_directories(mini_llama_core

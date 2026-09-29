@@ -173,9 +173,9 @@ size_t CheckedElementCount(const std::vector<int>& shape, const std::string& nam
   return count;
 }
 
-// 将当前模型支持的 GGML 存储格式统一展开为前向计算使用的连续 F32
-Tensor DecodeTensor(const std::string& path, const GgufReader& reader,
-                    const GgufTensorInfo& info) {
+// 仅将 norm、bias 和 embedding 等稠密张量展开为连续 F32
+Tensor DecodeDenseTensor(const std::string& path, const GgufReader& reader,
+                         const GgufTensorInfo& info) {
   // 先建立项目侧逻辑形状，并独立计算元素数与 GGUF 物理字节数
   const std::vector<int> shape = MapShape(info.shape);
   const size_t element_count = CheckedElementCount(shape, info.name);
@@ -264,6 +264,102 @@ Tensor DecodeTensor(const std::string& path, const GgufReader& reader,
         tensor.data[output_offset + index + kQuantBlockSize / 2] =
             scale * high + minimum;
       }
+    }
+  }
+  return tensor;
+}
+
+// 线性权重使用带类型的存储：Q4/Q8 保留 GGML 块，F32 保持连续浮点数组
+// 这样加载阶段不会为量化矩阵额外分配一份完整的 F32 Tensor
+QuantizedTensor DecodeLinearWeight(const std::string& path, const GgufReader& reader,
+                                   const GgufTensorInfo& info) {
+  const std::vector<int> shape = MapShape(info.shape);
+  if (shape.size() != 2) {
+    throw std::runtime_error("GGUF linear weight must be two-dimensional: " +
+                             info.name);
+  }
+  // QuantizedTensor 当前没有 F16 存储分支，因此仅 F16 仍转换为 F32
+  if (info.type == kGgmlTypeF16) {
+    return ToQuantizedTensor(DecodeDenseTensor(path, reader, info));
+  }
+
+  // 将 GGML 文件类型映射到项目内部的量化类型标签
+  QuantType type;
+  if (info.type == kGgmlTypeF32) {
+    type = QuantType::kF32;
+  } else if (info.type == kGgmlTypeQ80) {
+    type = QuantType::kQ80;
+  } else if (info.type == kGgmlTypeQ40) {
+    type = QuantType::kQ40;
+  } else if (info.type == kGgmlTypeQ41) {
+    type = QuantType::kQ41;
+  } else {
+    throw std::runtime_error("unsupported GGML linear weight type for: " +
+                             info.name);
+  }
+
+  uint64_t expected_size = 0;
+  if (!GgufTensorDataSize(info, expected_size) || expected_size == 0 ||
+      expected_size > std::numeric_limits<size_t>::max()) {
+    throw std::runtime_error("unsupported or invalid GGUF tensor type for: " +
+                             info.name);
+  }
+  // 原始字节只在构造对应块数组期间存在，不会展开成 element_count 个 float
+  const std::vector<uint8_t> bytes =
+      ReadGgufTensorRaw(path, info, reader.data_offset);
+  if (bytes.size() != static_cast<size_t>(expected_size)) {
+    throw std::runtime_error("failed to read GGUF tensor data: " + info.name);
+  }
+  if (type == QuantType::kF32) {
+    // F32 也放入 QuantizedTensor，使所有线性权重共享同一前向接口
+    QuantizedTensor tensor;
+    tensor.type = QuantType::kF32;
+    tensor.shape = shape;
+    tensor.f32_data.resize(CheckedElementCount(shape, info.name));
+    for (size_t index = 0; index < tensor.f32_data.size(); ++index) {
+      const uint32_t bits = ReadLittleEndian32(bytes.data() + index * 4);
+      std::memcpy(&tensor.f32_data[index], &bits, sizeof(float));
+    }
+    return tensor;
+  }
+  // GGML 量化块沿最快变化的输入维排列，不能跨越两个矩阵行
+  if (shape[1] % static_cast<int>(kQuantBlockSize) != 0) {
+    throw std::runtime_error("GGUF quantized linear row size must be divisible by " +
+                             std::to_string(kQuantBlockSize) + ": " + info.name);
+  }
+
+  const size_t element_count = CheckedElementCount(shape, info.name);
+  const size_t block_count = element_count / kQuantBlockSize;
+  QuantizedTensor tensor;
+  tensor.type = type;
+  tensor.shape = shape;
+  if (type == QuantType::kQ80) {
+    // Q8_0 块由一个 F16 scale 和 32 个 int8 权重组成
+    tensor.q8_0_data.resize(block_count);
+    for (size_t block = 0; block < block_count; ++block) {
+      const uint8_t* source = bytes.data() + block * sizeof(BlockQ80);
+      tensor.q8_0_data[block].d = ReadLittleEndian16(source);
+      std::memcpy(tensor.q8_0_data[block].qs, source + sizeof(uint16_t),
+                  kQ80BlockSize);
+    }
+  } else if (type == QuantType::kQ40) {
+    // Q4_0 每字节保存两个四位权重，scale 保持文件中的 F16 位模式
+    tensor.q4_0_data.resize(block_count);
+    for (size_t block = 0; block < block_count; ++block) {
+      const uint8_t* source = bytes.data() + block * sizeof(BlockQ40);
+      tensor.q4_0_data[block].d = ReadLittleEndian16(source);
+      std::memcpy(tensor.q4_0_data[block].qs, source + sizeof(uint16_t),
+                  kQ40BlockSize / 2);
+    }
+  } else {
+    // Q4_1 比 Q4_0 多一个 F16 minimum，量化值本身仍按半字节打包
+    tensor.q4_1_data.resize(block_count);
+    for (size_t block = 0; block < block_count; ++block) {
+      const uint8_t* source = bytes.data() + block * sizeof(BlockQ41);
+      tensor.q4_1_data[block].d = ReadLittleEndian16(source);
+      tensor.q4_1_data[block].m = ReadLittleEndian16(source + sizeof(uint16_t));
+      std::memcpy(tensor.q4_1_data[block].qs, source + sizeof(uint16_t) * 2,
+                  kQ41BlockSize / 2);
     }
   }
   return tensor;
@@ -378,6 +474,12 @@ void RequireShape(const Tensor& tensor, const std::vector<int>& expected,
   tensor.AssertShape(expected, name.c_str());
 }
 
+void RequireShape(const QuantizedTensor& tensor, const std::vector<int>& expected,
+                  const std::string& name) {
+  // 这里只校验逻辑形状；物理块数量在加载和 Linear 分发时分别严格检查。
+  tensor.AssertShape(expected, name.c_str());
+}
+
 void RequireOptionalShape(const Tensor& tensor, const std::vector<int>& expected,
                           const std::string& name) {
   // 空 Tensor 表示 GGUF 中未提供可选偏置，不应按缺失必需权重处理
@@ -443,47 +545,55 @@ MiniLlamaModel LoadGgufModel(const std::string& gguf_path) {
       }
     }
 
-    auto load_required = [&](const std::string& name) {
+    auto find_required = [&](const std::string& name) {
       // 必需权重缺失立即失败，避免发布部分初始化的模型
       const auto found = tensors.find(name);
       if (found == tensors.end()) {
         throw std::runtime_error("missing required GGUF tensor: " + name);
       }
-      return DecodeTensor(gguf_path, reader, *found->second);
+      return found->second;
+    };
+    auto load_dense = [&](const std::string& name) {
+      // norm、bias 和 embedding 仍由普通 F32 Tensor 承载。
+      return DecodeDenseTensor(gguf_path, reader, *find_required(name));
+    };
+    auto load_linear = [&](const std::string& name) {
+      // 所有 Linear 矩阵走量化感知路径，避免误用稠密解码函数。
+      return DecodeLinearWeight(gguf_path, reader, *find_required(name));
     };
     auto load_optional = [&](const std::string& name) {
       // 可选偏置不存在时返回空 Tensor，存在时与普通权重走同一解码路径
       const auto found = tensors.find(name);
       return found == tensors.end()
                  ? Tensor()
-                 : DecodeTensor(gguf_path, reader, *found->second);
+                 : DecodeDenseTensor(gguf_path, reader, *found->second);
     };
 
     // 第二阶段按 MiniLlamaModel 的结构顺序加载模型级张量和每层权重
-    model.token_embedding = load_required("token_embedding");
+    model.token_embedding = load_dense("token_embedding");
     for (int layer = 0; layer < model.config.n_layers; ++layer) {
       LayerWeights& weights = model.layers[static_cast<size_t>(layer)];
       const std::string prefix = "layers." + std::to_string(layer) + ".";
-      weights.attention_norm = load_required(prefix + "attention_norm");
-      weights.wq = load_required(prefix + "wq");
-      weights.wk = load_required(prefix + "wk");
-      weights.wv = load_required(prefix + "wv");
+      weights.attention_norm = load_dense(prefix + "attention_norm");
+      weights.wq = load_linear(prefix + "wq");
+      weights.wk = load_linear(prefix + "wk");
+      weights.wv = load_linear(prefix + "wv");
       weights.bq = load_optional(prefix + "bq");
       weights.bk = load_optional(prefix + "bk");
       weights.bv = load_optional(prefix + "bv");
-      weights.wo = load_required(prefix + "wo");
-      weights.ffn_norm = load_required(prefix + "ffn_norm");
-      weights.w_gate = load_required(prefix + "w_gate");
-      weights.w_up = load_required(prefix + "w_up");
-      weights.w_down = load_required(prefix + "w_down");
+      weights.wo = load_linear(prefix + "wo");
+      weights.ffn_norm = load_dense(prefix + "ffn_norm");
+      weights.w_gate = load_linear(prefix + "w_gate");
+      weights.w_up = load_linear(prefix + "w_up");
+      weights.w_down = load_linear(prefix + "w_down");
     }
-    model.final_norm = load_required("final_norm");
+    model.final_norm = load_dense("final_norm");
 
     // GGUF 允许省略 output.weight 表示与 token_embd.weight 共享权重
     const auto output = tensors.find("lm_head");
     model.lm_head = output == tensors.end()
-                        ? model.token_embedding
-                        : DecodeTensor(gguf_path, reader, *output->second);
+                        ? ToQuantizedTensor(model.token_embedding)
+                        : DecodeLinearWeight(gguf_path, reader, *output->second);
 
     ValidateLoadedShapes(model);
     // 只有全部张量加载并通过形状校验后，模型才可进入前向路径

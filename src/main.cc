@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <istream>
+#include <memory>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -13,6 +16,10 @@
 #include "mini_llama/chat.h"
 #include "mini_llama/context.h"
 #include "mini_llama/forward.h"
+#include "mini_llama/gguf.h"
+#include "mini_llama/gguf_loader.h"
+#include "mini_llama/gguf_tokenizer.h"
+#include "mini_llama/loader.h"
 #include "mini_llama/model.h"
 #include "mini_llama/prompt_builder.h"
 #include "mini_llama/sampler.h"
@@ -24,7 +31,7 @@
 // 流式输出和 KV Cache 前缀复用
 namespace mini_llama {
 
-// 可注入输入流的重载供 run 模式和单元测试共用
+// 可注入输入流的重载供 run 模式、进程装配和单元测试共用
 int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
         const ITokenizer& tokenizer, std::istream& input, std::ostream& output,
         std::ostream& error);
@@ -81,12 +88,12 @@ GenerateOptions ParseGenerateOptions(int argc, const char* const argv[]) {
   GenerateOptions options;
   for (int index = 0; index < argc; ++index) {
     const std::string option = argv[index];
-    if (option == "--prompt") {
+    if (option == "--prompt" || option == "-p") {
       if (++index >= argc) {
         throw std::invalid_argument("missing value for --prompt");
       }
       options.prompt = argv[index];
-    } else if (option == "--max-tokens") {
+    } else if (option == "--max-tokens" || option == "-n") {
       if (++index >= argc) {
         throw std::invalid_argument("missing value for --max-tokens");
       }
@@ -334,10 +341,13 @@ int RunInteractive(const MiniLlamaModel& model, const ITokenizer& tokenizer,
 // 输出两个运行模式共用的命令行帮助，不承担模型加载职责
 void PrintUsage(std::ostream& output) {
   output << "Usage:\n"
-         << "  generate --prompt TEXT [--max-tokens N] [--temperature FLOAT] "
-            "[--top-k N] [--seed N]\n"
-         << "  run [--prompt TEXT] [--max-tokens N] [--temperature FLOAT] "
-            "[--top-k N] [--seed N]\n";
+         << "  mini-llama generate --model MODEL.gguf --prompt TEXT "
+            "[--max-tokens N] [--temperature FLOAT] [--top-k N] [--seed N]\n"
+         << "  mini-llama run --model MODEL.gguf [--prompt TEXT] "
+            "[--max-tokens N] [--temperature FLOAT] [--top-k N] [--seed N]\n"
+         << "  mini-llama generate --config MODEL.json --weights MODEL.bin "
+            "[--vocab VOCAB.json] --prompt TEXT [--max-tokens N]\n"
+         << "  mini-llama inspect-gguf MODEL.gguf\n";
 }
 
 }  // namespace
@@ -420,6 +430,167 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
     error << exception.what() << '\n';
     return 1;
   }
+}
+
+namespace {
+
+struct LaunchOptions {
+  std::string model_path;
+  std::string config_path;
+  std::string weights_path;
+  std::string vocab_path;
+  std::vector<const char*> forwarded_arguments;
+};
+
+struct LoadedResources {
+  MiniLlamaModel model;
+  std::unique_ptr<ITokenizer> tokenizer;
+};
+
+void SetPathOption(std::string* destination, const std::string& option, int* index,
+                   int argc, const char* const argv[]) {
+  if (!destination->empty()) {
+    throw std::invalid_argument("duplicate option: " + option);
+  }
+  if (++(*index) >= argc) {
+    throw std::invalid_argument("missing value for " + option);
+  }
+  *destination = argv[*index];
+  if (destination->empty()) {
+    throw std::invalid_argument("empty value for " + option);
+  }
+}
+
+LaunchOptions ParseLaunchOptions(int argc, const char* const argv[]) {
+  LaunchOptions options;
+  options.forwarded_arguments.push_back(argv[0]);
+  for (int index = 1; index < argc; ++index) {
+    const std::string option = argv[index];
+    if (option == "--model" || option == "-m") {
+      SetPathOption(&options.model_path, option, &index, argc, argv);
+    } else if (option == "--config") {
+      SetPathOption(&options.config_path, option, &index, argc, argv);
+    } else if (option == "--weights") {
+      SetPathOption(&options.weights_path, option, &index, argc, argv);
+    } else if (option == "--vocab") {
+      SetPathOption(&options.vocab_path, option, &index, argc, argv);
+    } else {
+      options.forwarded_arguments.push_back(argv[index]);
+    }
+  }
+  return options;
+}
+
+bool IsGgufPath(const std::string& path) {
+  std::string extension = std::filesystem::path(path).extension().string();
+  std::transform(extension.begin(), extension.end(), extension.begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  return extension == ".gguf";
+}
+
+LoadedResources LoadResources(const LaunchOptions& options) {
+  LoadedResources resources;
+  if (!options.model_path.empty()) {
+    if (!options.config_path.empty() || !options.weights_path.empty() ||
+        !options.vocab_path.empty()) {
+      throw std::invalid_argument(
+          "--model cannot be combined with --config, --weights, or --vocab");
+    }
+    if (!IsGgufPath(options.model_path)) {
+      throw std::invalid_argument(
+          "--model currently requires a .gguf file; use --config and --weights "
+          "for the legacy format");
+    }
+    resources.model = LoadGgufModel(options.model_path);
+    if (!resources.model.loaded) {
+      throw std::runtime_error("failed to load GGUF model: " +
+                               resources.model.load_error);
+    }
+    resources.tokenizer = CreateGgufTokenizer(options.model_path);
+    if (!resources.tokenizer) {
+      throw std::runtime_error("failed to load tokenizer from GGUF model");
+    }
+    return resources;
+  }
+
+  if (options.config_path.empty() || options.weights_path.empty()) {
+    throw std::invalid_argument(
+        "provide --model MODEL.gguf or both --config MODEL.json and --weights "
+        "MODEL.bin");
+  }
+
+  const ModelManifest manifest = ParseManifest(options.config_path);
+  resources.model = LoadModel(options.config_path, options.weights_path);
+  if (!resources.model.loaded) {
+    throw std::runtime_error("failed to load model: " + resources.model.load_error);
+  }
+
+  if (manifest.tokenizer.type == "ascii" && options.vocab_path.empty()) {
+    resources.tokenizer = std::make_unique<AsciiTokenizer>();
+    return resources;
+  }
+
+  std::filesystem::path vocab_path = options.vocab_path;
+  if (vocab_path.empty()) {
+    vocab_path = std::filesystem::path(options.config_path).parent_path() /
+                 manifest.tokenizer.path;
+  }
+  if (!std::filesystem::is_regular_file(vocab_path)) {
+    throw std::runtime_error("tokenizer vocabulary does not exist: " +
+                             vocab_path.string());
+  }
+  resources.tokenizer = CreateTokenizer(vocab_path.string());
+  return resources;
+}
+
+bool HasHelpOption(int argc, const char* const argv[]) {
+  for (int index = 1; index < argc; ++index) {
+    if (std::string(argv[index]) == "--help" || std::string(argv[index]) == "-h") {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+int RunMain(int argc, const char* const argv[], std::istream& input,
+            std::ostream& output, std::ostream& error) {
+  try {
+    if (argc <= 1 || HasHelpOption(argc, argv)) {
+      PrintUsage(output);
+      return 0;
+    }
+
+    if (std::string(argv[1]) == "inspect-gguf") {
+      if (argc != 3) {
+        throw std::invalid_argument(
+            "inspect-gguf requires exactly one GGUF file path");
+      }
+      GgufReader reader;
+      if (!reader.Load(argv[2])) {
+        throw std::runtime_error("failed to inspect GGUF model: " +
+                                 reader.load_error);
+      }
+      InspectGguf(reader);
+      return 0;
+    }
+
+    const LaunchOptions options = ParseLaunchOptions(argc, argv);
+    LoadedResources resources = LoadResources(options);
+    return Run(static_cast<int>(options.forwarded_arguments.size()),
+               options.forwarded_arguments.data(), resources.model,
+               *resources.tokenizer, input, output, error);
+  } catch (const std::exception& exception) {
+    error << exception.what() << '\n';
+    return 1;
+  }
+}
+
+int RunMain(int argc, const char* const argv[]) {
+  return RunMain(argc, argv, std::cin, std::cout, std::cerr);
 }
 
 }  // namespace mini_llama

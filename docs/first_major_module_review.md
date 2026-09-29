@@ -107,7 +107,7 @@ data ：按行优先连续存放的 float
 | `Rope` | 给 Q、K 注入位置信息 |
 | `ArgMax` | 贪心采样选择最大 logit |
 
-`MatmulDispatch` 暴露了朴素、线程、SIMD、线程 SIMD 四种模式入口，但当前默认仍是朴素 CPU 实现。因此“dispatch 已存在”不等于“高性能后端已经完成”。
+`MatmulDispatch` 当前仅暴露已经完成的朴素 CPU 模式。dispatch 结构仍保留为独立扩展点，线程或 SIMD 后端只有在实现完成并通过测试后才应加入公开枚举。
 
 ### 3.2 模型结构与模型加载器
 
@@ -579,12 +579,14 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 
 复习时要把“已经有组件”和“已经端到端自动接线”区分开：
 
-- 当前是 CPU F32 教学实现，没有量化权重和 GPU 后端。
+- 当前提供 CPU F32 与 Q8_0/Q4_0/Q4_1 标量 Linear；量化路径尚未使用 SIMD，
+  embedding 仍为 F32，也没有 GPU 后端。
 - `MiniBatch` 内部仍逐 token 执行，不是并行 batch 推理。
 - `src/main.cc` 没有进程级 `main()`，项目目前构建的是核心库和测试。
 - Loader 不会根据 `TokenizerInfo` 自动实例化 tokenizer。
 - Loader 与 `Run()` 之间没有最终 CLI 装配层。
-- GGUF 当前主要用于 tokenizer 元数据，模型权重加载走自定义 `model.json + model.bin`。
+- GGUF 模型权重可映射到 `MiniLlamaModel`，支持上述量化 Linear；自定义
+  `model.json + model.bin` 路径继续使用 F32 权重。
 - `RequestContext` 已实现，但未接入 Generate/Run 的阶段计时。
 - Context 中的 `n_prefill_tokens` / `n_decode_tokens` 字段目前没有在主流程更新。
 - 聊天模板当前由 `PromptBuilder` 接收字符串，尚未自动从模型格式注入。

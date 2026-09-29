@@ -3,7 +3,7 @@
 ## 实现范围
 
 - `Tensor` 提供 F32 稠密张量，保存 `shape` 与连续 `data`，支持 1D 至 4D 便捷访问、通用多维索引、二维行指针、shape 校验和安全重塑。
-- `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`，并通过 `MatmulMode` 暴露朴素、线程、SIMD 和线程 SIMD 四种模式入口；当前默认模式为朴素实现。
+- `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`。当前仅暴露并默认使用已完成的朴素模式；分发入口保持独立，后续后端实现完成后可显式接入。
 - `LinearDispatch` 支持 `[in_features]` 与 `[1, in_features]` 输入，按 `x @ weight^T` 计算并保持输入秩。
 - `RmsNorm`、`Softmax`、`Silu`、`ElementwiseMul`、`SwiGlu` 和 `ArgMax` 提供推理所需的基础逐元素及归约算子。
 
@@ -23,7 +23,7 @@
 `tests/unit/tensor_test.cc` 包含 13 个独立测试组，每个测试函数前均有注释说明测试目标，覆盖：
 
 - Tensor 构造、填充、索引展开、At 访问器、RowPtr、非法 shape/索引、AssertShape 和 ReshapeChecked。
-- 2×3 与 3×2 矩阵乘法，验证四种 dispatch 模式和错误维度处理。
+- 2×3 与 3×2 矩阵乘法，验证当前朴素 dispatch 模式和错误维度处理。
 - 一维与二维 Linear、RMSNorm、稳定 Softmax、Silu、逐元素乘法、SwiGLU 和 ArgMax。
 
 ## 验证方式
