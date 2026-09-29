@@ -70,3 +70,6 @@ Testing/
 
 # Codex
 .codex
+
+#Models
+models/chat/*.gguf
