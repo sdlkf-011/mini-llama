@@ -49,7 +49,8 @@ class AsciiTokenizer : public ITokenizer {
 
 // JSON 词表分词器：从 JSON 文件加载词表
 // 格式：[{"id": 0, "content": "<unk>", "special": true}, ...]
-// 编码采用贪心字符级回退策略（先精确匹配，再回退到 UNK）
+// 编码自动添加 BOS，并采用贪心最长匹配；未匹配字节回退到 UNK
+// 文件无法读取或格式非法时构造函数抛出 std::runtime_error
 class JsonVocabTokenizer : public ITokenizer {
  public:
   explicit JsonVocabTokenizer(const std::string& vocab_path);
@@ -102,9 +103,9 @@ class BpeTokenizer : public ITokenizer {
   int unk_id() const override { return unk_id_; }
 
  private:
-  std::unordered_map<std::string, int> voacb_;
+  std::unordered_map<std::string, int> vocab_;
   std::vector<std::string> id_to_token_;
-  std::map<std::pair<std::string, std::string>, int> mrege_ranks_;
+  std::map<std::pair<std::string, std::string>, int> merge_ranks_;
 
   int vocab_size_ = -1;
   int bos_id_ = -1;
@@ -124,8 +125,8 @@ class BpeTokenizer : public ITokenizer {
 // 工厂函数
 // -------------------------------------------------------
 
-// 如果 vocab_path 非空且文件存在，则加载 JsonVocabTokenizer
-// 否则回退到 AsciiTokenizer
+// 如果 vocab_path 非空且词表有效，则加载 JsonVocabTokenizer
+// 路径不存在或 JSON 加载失败时回退到 AsciiTokenizer
 std::unique_ptr<ITokenizer> CreateTokenizer(const std::string& vocab_path);
 
 // 从 vocab.json + merges.txt + special_tokens.json 加载 BPE 分词器。

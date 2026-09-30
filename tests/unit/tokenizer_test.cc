@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -139,7 +140,7 @@ TEST(TokenizerTest, AsciiTokenizer) {
         "非法 ASCII token 应解码为空串");
 }
 
-// 测试 JSON 词表的最长匹配、UTF-8 UNK 回退、控制 ID 和双向解码。
+// 测试 JSON 词表的 BOS、最长匹配、逐字节 UNK 回退和双向解码。
 TEST(TokenizerTest, JsonVocabTokenizer) {
   TemporaryDirectory directory;
   const auto vocab = directory.File("vocab.json");
@@ -153,23 +154,23 @@ TEST(TokenizerTest, JsonVocabTokenizer) {
   Check(
       tokenizer.bos_id() == 1 && tokenizer.eos_id() == 2 && tokenizer.unk_id() == 0,
       "JSON 控制 token ID 错误");
-  Check(tokenizer.Encode("ab你x") == std::vector<int>({4, 5, 0}),
-        "JSON 最长匹配或 UTF-8 回退错误");
+  Check(tokenizer.Encode("ab你x") == std::vector<int>({1, 4, 5, 0}),
+        "JSON BOS、最长匹配或 UNK 回退错误");
+  Check(tokenizer.Encode("好") == std::vector<int>({1, 0, 0, 0}),
+        "JSON 未知 UTF-8 字符应逐字节回退");
   Check(tokenizer.Decode({4, 5, 0}) == "ab你<unk>", "JSON 解码错误");
-  Check(tokenizer.DecodeToken(99).empty(), "越界 JSON token 应解码为空串");
+  Check(tokenizer.DecodeToken(99) == "<unk>", "越界 JSON token 应解码为 UNK");
 }
 
-// 测试损坏或不存在的 JSON 词表不会产生可用词表数据。
+// 测试损坏或不存在的 JSON 词表会通过异常明确报告加载失败。
 TEST(TokenizerTest, InvalidJsonVocabTokenizer) {
   TemporaryDirectory directory;
   const auto invalid = directory.File("invalid.json");
   WriteText(invalid, "not-json");
 
-  JsonVocabTokenizer malformed(invalid.string());
-  JsonVocabTokenizer missing(directory.File("missing.json").string());
-
-  Check(malformed.vocab_size() == 0, "损坏 JSON 应加载失败");
-  Check(missing.vocab_size() == 0, "不存在的 JSON 应加载失败");
+  EXPECT_THROW(JsonVocabTokenizer malformed(invalid.string()), std::runtime_error);
+  EXPECT_THROW(JsonVocabTokenizer missing(directory.File("missing.json").string()),
+               std::runtime_error);
 }
 
 // 测试独立 BPE 文件的加载、合并优先级、特殊 token 和解码流程。
@@ -219,12 +220,18 @@ TEST(TokenizerTest, GenericFactory) {
       R"([{"id":0,"content":"<unk>","special":true},{"id":3,"content":"ok","special":false}])");
 
   auto json = mini_llama::CreateTokenizer(vocab.string());
-  auto ascii = mini_llama::CreateTokenizer(directory.File("missing.json").string());
+  const auto invalid = directory.File("invalid.json");
+  WriteText(invalid, "not-json");
+  auto missing =
+      mini_llama::CreateTokenizer(directory.File("missing.json").string());
+  auto malformed = mini_llama::CreateTokenizer(invalid.string());
 
   Check(dynamic_cast<JsonVocabTokenizer*>(json.get()) != nullptr,
         "有效路径应创建 JSON 分词器");
-  Check(dynamic_cast<AsciiTokenizer*>(ascii.get()) != nullptr,
+  Check(dynamic_cast<AsciiTokenizer*>(missing.get()) != nullptr,
         "缺失路径应回退到 ASCII 分词器");
+  Check(dynamic_cast<AsciiTokenizer*>(malformed.get()) != nullptr,
+        "损坏 JSON 应回退到 ASCII 分词器");
 }
 
 // 测试 GGUF 元数据加载、BPE 合并、特殊 token、控制 ID 和解码。

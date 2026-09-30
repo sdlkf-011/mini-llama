@@ -1,382 +1,337 @@
 #include <algorithm>
 #include <cctype>
-#include <cstddef>
+#include <filesystem>
 #include <fstream>
-#include <iterator>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mini_llama/tokenizer.h"
 
 namespace mini_llama {
 
+// 该解析器只服务于数组形式的简单词表：
+// [{"id": 0, "content": "<unk>", "special": true}, ...]
 namespace {
 
-// 本文件实现 ASCII 分词器和数组对象格式的 JSON 词表分词器。
-// 这里使用受限 JSON 读取器，覆盖词表所需的字符串、整数和布尔字段，
-// 从而避免给核心库引入第三方 JSON 依赖。
-class JsonReader {
- public:
-  explicit JsonReader(std::string text) : text_(std::move(text)) {}
+// 跳过 JSON 语法允许的空白字符
+void SkipWhitespace(const std::string& text, size_t& position) {
+  while (position < text.size() &&
+         std::isspace(static_cast<unsigned char>(text[position]))) {
+    ++position;
+  }
+}
 
-  struct ParsedEntry {
-    int id = 0;
-    std::string content;
-    bool special = false;
-  };
+// 将 Unicode 码点追加为 UTF-8，保证中文等非 ASCII 转义能够正确加载
+void AppendUtf8(unsigned int codepoint, std::string& output) {
+  if (codepoint <= 0x7f) {
+    output.push_back(static_cast<char>(codepoint));
+  } else if (codepoint <= 0x7ff) {
+    output.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+  } else if (codepoint <= 0xffff) {
+    output.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+  } else {
+    output.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+    output.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+  }
+}
 
-  bool ParseEntry(ParsedEntry* entry) {
-    // 逐字段读取一个词表对象，未知字段通过 SkipValue 跳过以保持兼容性。
-    SkipSpace();
-    if (position_ >= text_.size() || text_[position_++] != '{') {
-      return false;
-    }
-
-    while (true) {
-      SkipSpace();
-      if (position_ < text_.size() && text_[position_] == '}') {
-        ++position_;
-        return true;
-      }
-      std::string key;
-      if (!ParseString(&key)) {
-        return false;
-      }
-      SkipSpace();
-      if (position_ >= text_.size() || text_[position_++] != ':') {
-        return false;
-      }
-      SkipSpace();
-      if (key == "id") {
-        int value = 0;
-        if (!ParseInt(&value)) {
-          return false;
-        }
-        entry->id = value;
-      } else if (key == "content") {
-        if (!ParseString(&entry->content)) {
-          return false;
-        }
-      } else if (key == "special") {
-        if (!ParseBool(&entry->special)) {
-          return false;
-        }
-      } else if (!SkipValue()) {
-        return false;
-      }
-      SkipSpace();
-      if (position_ >= text_.size()) {
-        return false;
-      }
-      if (text_[position_] == ',') {
-        ++position_;
-        continue;
-      }
-      if (text_[position_] == '}') {
-        ++position_;
-        return true;
-      }
-      return false;
+// 读取四位十六进制数；非法数字会立即终止词表加载
+unsigned int ParseHex4(const std::string& text, size_t& position) {
+  if (position + 4 > text.size()) {
+    throw std::runtime_error("incomplete unicode escape in vocab JSON");
+  }
+  unsigned int value = 0;
+  for (int index = 0; index < 4; ++index) {
+    const char digit = text[position++];
+    value <<= 4;
+    if (digit >= '0' && digit <= '9') {
+      value += digit - '0';
+    } else if (digit >= 'a' && digit <= 'f') {
+      value += digit - 'a' + 10;
+    } else if (digit >= 'A' && digit <= 'F') {
+      value += digit - 'A' + 10;
+    } else {
+      throw std::runtime_error("invalid unicode escape in vocab JSON");
     }
   }
+  return value;
+}
 
-  bool BeginArray() {
-    // 词表顶层必须是 JSON 数组。
-    SkipSpace();
-    return position_ < text_.size() && text_[position_++] == '[';
+// 解析 JSON 字符串以及标准转义，\uXXXX 会被转换成 UTF-8
+std::string ParseJsonString(const std::string& text, size_t& position) {
+  SkipWhitespace(text, position);
+  if (position >= text.size() || text[position] != '"') {
+    throw std::runtime_error("expected JSON string in vocab entry");
   }
+  ++position;
 
-  bool EndArray() {
-    // 确认所有词条后存在数组结束符。
-    SkipSpace();
-    if (position_ < text_.size() && text_[position_] == ']') {
-      ++position_;
-      return true;
+  std::string result;
+  while (position < text.size()) {
+    const char character = text[position++];
+    if (character == '"') {
+      return result;
     }
-    return false;
-  }
-
-  bool HasValue() {
-    SkipSpace();
-    return position_ < text_.size() && text_[position_] != ']';
-  }
-
-  bool ConsumeComma() {
-    // 词条之间允许空白，但必须由逗号分隔。
-    SkipSpace();
-    if (position_ < text_.size() && text_[position_] == ',') {
-      ++position_;
-      return true;
+    if (character != '\\') {
+      result.push_back(character);
+      continue;
     }
-    return false;
-  }
-
- private:
-  void SkipSpace() {
-    // 所有解析入口统一忽略 JSON 空白字符。
-    while (position_ < text_.size() &&
-           std::isspace(static_cast<unsigned char>(text_[position_]))) {
-      ++position_;
+    if (position >= text.size()) {
+      throw std::runtime_error("unterminated escape in vocab JSON");
     }
-  }
 
-  bool ParseString(std::string* value) {
-    // 解析 JSON 转义，并将 \uXXXX 编码转换为 UTF-8 字节序列。
-    SkipSpace();
-    if (position_ >= text_.size() || text_[position_++] != '"') {
-      return false;
-    }
-    value->clear();
-
-    while (position_ < text_.size()) {
-      const char c = text_[position_++];
-      if (c == '"') {
-        return true;
-      }
-      if (c != '\\') {
-        value->push_back(c);
-        continue;
-      }
-      if (position_ >= text_.size()) {
-        return false;
-      }
-
-      const char escape = text_[position_++];
-      switch (escape) {
-        case '"':
-          value->push_back('"');
-          break;
-        case '\\':
-          value->push_back('\\');
-          break;
-        case '/':
-          value->push_back('/');
-          break;
-        case 'b':
-          value->push_back('\b');
-          break;
-        case 'f':
-          value->push_back('\f');
-          break;
-        case 'n':
-          value->push_back('\n');
-          break;
-        case 'r':
-          value->push_back('\r');
-          break;
-        case 't':
-          value->push_back('\t');
-          break;
-        case 'u': {
-          // 词表常含 ASCII 转义；这里将 Unicode 转义（含代理对）转换为 UTF-8。
-          if (position_ + 4 > text_.size()) {
-            return false;
+    const char escaped = text[position++];
+    switch (escaped) {
+      case '"':
+      case '\\':
+      case '/':
+        result.push_back(escaped);
+        break;
+      case 'b':
+        result.push_back('\b');
+        break;
+      case 'f':
+        result.push_back('\f');
+        break;
+      case 'n':
+        result.push_back('\n');
+        break;
+      case 'r':
+        result.push_back('\r');
+        break;
+      case 't':
+        result.push_back('\t');
+        break;
+      case 'u': {
+        unsigned int codepoint = ParseHex4(text, position);
+        if (codepoint >= 0xd800 && codepoint <= 0xdbff) {
+          if (position + 2 > text.size() || text[position] != '\\' ||
+              text[position + 1] != 'u') {
+            throw std::runtime_error("missing low surrogate in vocab JSON");
           }
-
-          unsigned codepoint = 0;
-          for (int i = 0; i < 4; ++i) {
-            const char digit = text_[position_++];
-            codepoint <<= 4;
-            if (digit >= '0' && digit <= '9') {
-              codepoint += digit - '0';
-            } else if (digit >= 'a' && digit <= 'f') {
-              codepoint += digit - 'a' + 10;
-            } else if (digit >= 'A' && digit <= 'F') {
-              codepoint += digit - 'A' + 10;
-            } else {
-              return false;
-            }
+          position += 2;
+          const unsigned int low = ParseHex4(text, position);
+          if (low < 0xdc00 || low > 0xdfff) {
+            throw std::runtime_error("invalid low surrogate in vocab JSON");
           }
-
-          if (codepoint >= 0xd800 && codepoint <= 0xdbff &&
-              position_ + 6 <= text_.size() && text_[position_] == '\\' &&
-              text_[position_ + 1] == 'u') {
-            position_ += 2;
-            unsigned low = 0;
-            for (int i = 0; i < 4; ++i) {
-              const char digit = text_[position_++];
-              low <<= 4;
-              if (digit >= '0' && digit <= '9') {
-                low += digit - '0';
-              } else if (digit >= 'a' && digit <= 'f') {
-                low += digit - 'a' + 10;
-              } else if (digit >= 'A' && digit <= 'F') {
-                low += digit - 'A' + 10;
-              } else {
-                return false;
-              }
-            }
-            if (low < 0xdc00 || low > 0xdfff) {
-              return false;
-            }
-            codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + low - 0xdc00;
-          }
-          if (codepoint <= 0x7f) {
-            value->push_back(static_cast<char>(codepoint));
-          } else if (codepoint <= 0x7ff) {
-            value->push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
-            value->push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-          } else if (codepoint <= 0xffff) {
-            value->push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
-            value->push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
-            value->push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-          } else {
-            value->push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
-            value->push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
-            value->push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
-            value->push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-          }
-          break;
+          codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + low - 0xdc00;
+        } else if (codepoint >= 0xdc00 && codepoint <= 0xdfff) {
+          throw std::runtime_error("unexpected low surrogate in vocab JSON");
         }
-        default:
-          return false;
+        AppendUtf8(codepoint, result);
+        break;
       }
+      default:
+        throw std::runtime_error("unsupported escape in vocab JSON");
     }
-    return false;
   }
+  throw std::runtime_error("unterminated string in vocab JSON");
+}
 
-  bool ParseInt(int* value) {
-    // ID 只接受十进制整数，并捕获越界转换异常。
-    SkipSpace();
-    const size_t start = position_;
-    if (position_ < text_.size() && text_[position_] == '-') {
-      ++position_;
-    }
+// 解析十进制整数，并检查空值和 int 范围溢出
+int ParseJsonInt(const std::string& text, size_t& position) {
+  SkipWhitespace(text, position);
+  const size_t start = position;
+  if (position < text.size() && text[position] == '-') {
+    ++position;
+  }
+  const size_t digits = position;
+  while (position < text.size() &&
+         std::isdigit(static_cast<unsigned char>(text[position]))) {
+    ++position;
+  }
+  if (digits == position) {
+    throw std::runtime_error("expected integer in vocab entry");
+  }
+  try {
+    return std::stoi(text.substr(start, position - start));
+  } catch (const std::exception&) {
+    throw std::runtime_error("integer is out of range in vocab entry");
+  }
+}
 
-    while (position_ < text_.size() &&
-           std::isdigit(static_cast<unsigned char>(text_[position_]))) {
-      ++position_;
-    }
-
-    if (start == position_ || (text_[start] == '-' && start + 1 == position_)) {
-      return false;
-    }
-
-    try {
-      *value = std::stoi(text_.substr(start, position_ - start));
-    } catch (...) {
-      return false;
-    }
+// 解析 JSON 布尔字面量
+bool ParseJsonBool(const std::string& text, size_t& position) {
+  SkipWhitespace(text, position);
+  if (text.compare(position, 4, "true") == 0) {
+    position += 4;
     return true;
   }
-
-  bool ParseBool(bool* value) {
-    // special 字段只接受标准 JSON 布尔字面量。
-    SkipSpace();
-    if (text_.compare(position_, 4, "true") == 0) {
-      position_ += 4;
-      *value = true;
-      return true;
-    }
-    if (text_.compare(position_, 5, "false") == 0) {
-      position_ += 5;
-      *value = false;
-      return true;
-    }
+  if (text.compare(position, 5, "false") == 0) {
+    position += 5;
     return false;
   }
+  throw std::runtime_error("expected boolean in vocab entry");
+}
 
-  bool SkipValue() {
-    // 未知字段无需保存，但必须完整越过其值以继续解析当前对象。
-    SkipSpace();
-    if (position_ >= text_.size()) {
-      return false;
-    }
-    if (text_[position_] == '"') {
-      std::string ignored;
-      return ParseString(&ignored);
-    }
-    if (text_[position_] == '{') {
-      ++position_;
-      int depth = 1;
-      while (position_ < text_.size() && depth) {
-        if (text_[position_] == '{') {
+// 跳过未知字段的值；支持字符串、对象、数组和普通字面量
+void SkipJsonValue(const std::string& text, size_t& position) {
+  SkipWhitespace(text, position);
+  if (position >= text.size()) {
+    throw std::runtime_error("missing value in vocab entry");
+  }
+  if (text[position] == '"') {
+    ParseJsonString(text, position);
+    return;
+  }
+
+  if (text[position] == '{' || text[position] == '[') {
+    const char opening = text[position++];
+    const char closing = opening == '{' ? '}' : ']';
+    int depth = 1;
+    while (position < text.size() && depth > 0) {
+      if (text[position] == '"') {
+        ParseJsonString(text, position);
+      } else {
+        if (text[position] == opening) {
           ++depth;
-        } else if (text_[position_] == '}') {
+        } else if (text[position] == closing) {
           --depth;
         }
-        ++position_;
+        ++position;
       }
-      return depth == 0;
     }
 
-    while (position_ < text_.size() && text_[position_] != ',' &&
-           text_[position_] != '}') {
-      ++position_;
+    if (depth != 0) {
+      throw std::runtime_error("unterminated value in vocab entry");
     }
-    return true;
+    return;
   }
 
-  std::string text_;
-  size_t position_ = 0;
-};
-
-size_t NextUtf8Character(const std::string& text, size_t offset) {
-  // 未匹配词表时按一个 UTF-8 字符前进，避免把多字节字符拆成多个 UNK。
-  if (offset >= text.size()) {
-    return offset;
+  const size_t start = position;
+  while (position < text.size() && text[position] != ',' && text[position] != '}') {
+    ++position;
   }
-  const unsigned char c = static_cast<unsigned char>(text[offset]);
-  size_t length = c < 0x80 ? 1 : (c < 0xe0 ? 2 : (c < 0xf0 ? 3 : 4));
-  if (offset + length > text.size()) {
-    return offset + 1;
+  if (start == position) {
+    throw std::runtime_error("invalid value in vocab entry");
   }
-  return offset + length;
 }
 
 }  // namespace
 
 JsonVocabTokenizer::JsonVocabTokenizer(const std::string& vocab_path) {
-  // 加载数组词表，同时建立 id->内容和内容->id 两个方向的索引。
+  // 一次性读取词表文件，读取和格式错误统一通过异常报告给工厂函数
   std::ifstream input(vocab_path);
-  if (!input) {
-    return;
+  if (!input.is_open()) {
+    throw std::runtime_error("failed to open vocab: " + vocab_path);
+  }
+  std::stringstream buffer;
+  buffer << input.rdbuf();
+  if (input.bad()) {
+    throw std::runtime_error("failed to read vocab: " + vocab_path);
+  }
+  const std::string text = buffer.str();
+
+  size_t position = 0;
+  SkipWhitespace(text, position);
+  if (position >= text.size() || text[position++] != '[') {
+    throw std::runtime_error("vocab JSON must be an array");
   }
 
-  const std::string contents((std::istreambuf_iterator<char>(input)), {});
-  JsonReader reader(contents);
-  if (!reader.BeginArray()) {
-    return;
-  }
-
-  while (reader.HasValue()) {
-    // 每个词条按 ID 放入数组；稀疏 ID 会保留空槽，确保索引不偏移。
-    JsonReader::ParsedEntry parsed;
-    if (!reader.ParseEntry(&parsed)) {
-      id_to_entry_.clear();
-      content_to_id_.clear();
-      return;
+  int max_id = -1;
+  while (true) {
+    SkipWhitespace(text, position);
+    if (position < text.size() && text[position] == ']') {
+      ++position;
+      break;
     }
-    if (parsed.id < 0) {
+    if (position >= text.size() || text[position++] != '{') {
+      throw std::runtime_error("vocab array item must be an object");
+    }
+
+    VocabEntry entry;
+    bool has_id = false;
+    bool has_content = false;
+    while (true) {
+      SkipWhitespace(text, position);
+      if (position < text.size() && text[position] == '}') {
+        ++position;
+        break;
+      }
+
+      const std::string key = ParseJsonString(text, position);
+      SkipWhitespace(text, position);
+      if (position >= text.size() || text[position++] != ':') {
+        throw std::runtime_error("expected ':' after vocab field name");
+      }
+
+      if (key == "id") {
+        entry.id = ParseJsonInt(text, position);
+        has_id = true;
+      } else if (key == "content") {
+        entry.content = ParseJsonString(text, position);
+        has_content = true;
+      } else if (key == "special") {
+        entry.special = ParseJsonBool(text, position);
+      } else {
+        SkipJsonValue(text, position);
+      }
+
+      SkipWhitespace(text, position);
+      if (position < text.size() && text[position] == ',') {
+        ++position;
+        continue;
+      }
+      if (position >= text.size() || text[position] != '}') {
+        throw std::runtime_error("expected ',' or '}' in vocab entry");
+      }
+    }
+
+    if (!has_id || !has_content) {
+      throw std::runtime_error("vocab entry missing id or content");
+    }
+    if (entry.id < 0) {
+      throw std::runtime_error("vocab entry id must be non-negative");
+    }
+
+    max_id = std::max(max_id, entry.id);
+    if (static_cast<size_t>(entry.id) >= id_to_entry_.size()) {
+      id_to_entry_.resize(static_cast<size_t>(entry.id) + 1);
+    }
+    id_to_entry_[entry.id] = entry;
+    content_to_id_.emplace_back(entry.content, entry.id);
+
+    // 兼容项目现有模型使用的常见控制 token 名称
+    if (entry.content == "<bos>" || entry.content == "<s>" ||
+        entry.content == "<|begin_of_text|>") {
+      bos_id_ = entry.id;
+    } else if (entry.content == "<eos>" || entry.content == "</s>" ||
+               entry.content == "<|end_of_text|>") {
+      eos_id_ = entry.id;
+    } else if (entry.content == "<unk>" || entry.content == "<UNK>") {
+      unk_id_ = entry.id;
+    }
+
+    SkipWhitespace(text, position);
+    if (position < text.size() && text[position] == ',') {
+      ++position;
       continue;
     }
-    if (parsed.id >= static_cast<int>(id_to_entry_.size())) {
-      id_to_entry_.resize(parsed.id + 1);
+    if (position >= text.size() || text[position] != ']') {
+      throw std::runtime_error("expected ',' or ']' after vocab entry");
     }
-    id_to_entry_[parsed.id] = {parsed.id, parsed.content, parsed.special};
-    content_to_id_.emplace_back(parsed.content, parsed.id);
-    if (parsed.content == "<bos>" || parsed.content == "<s>" ||
-        parsed.content == "<|begin_of_text|>") {
-      bos_id_ = parsed.id;
-    }
-    if (parsed.content == "<eos>" || parsed.content == "</s>" ||
-        parsed.content == "<|end_of_text|>") {
-      eos_id_ = parsed.id;
-    }
-    if (parsed.content == "<unk>" || parsed.content == "<UNK>") {
-      unk_id_ = parsed.id;
-    }
-    reader.ConsumeComma();
   }
 
-  if (!reader.EndArray()) {
-    id_to_entry_.clear();
-    content_to_id_.clear();
-    return;
+  SkipWhitespace(text, position);
+  if (position != text.size()) {
+    throw std::runtime_error("unexpected content after vocab array");
   }
-  vocab_size_ = static_cast<int>(id_to_entry_.size());
+  if (max_id < 0) {
+    throw std::runtime_error("vocab file contains no entries");
+  }
+
+  vocab_size_ = max_id + 1;
+  // 编码阶段执行贪心最长匹配；长度相同时按较小 ID 保持确定性
   std::sort(content_to_id_.begin(), content_to_id_.end(),
-            // 编码阶段采用贪心最长匹配，因此预先按内容长度降序排列。
             [](const auto& left, const auto& right) {
               if (left.first.size() != right.first.size()) {
                 return left.first.size() > right.first.size();
@@ -386,44 +341,60 @@ JsonVocabTokenizer::JsonVocabTokenizer(const std::string& vocab_path) {
 }
 
 std::vector<int> JsonVocabTokenizer::Encode(const std::string& text) const {
-  std::vector<int> result;
-  size_t offset = 0;
-  while (offset < text.size()) {
-    // 内容索引已按长度降序排列，多字符词条优先于其单字符前缀。
+  // JSON 词表编码遵循模型输入约定：序列开头自动加入 BOS
+  std::vector<int> tokens;
+  tokens.push_back(bos_id_);
+
+  size_t position = 0;
+  while (position < text.size()) {
     bool matched = false;
     for (const auto& item : content_to_id_) {
-      if (!item.first.empty() &&
-          text.compare(offset, item.first.size(), item.first) == 0) {
-        result.push_back(item.second);
-        offset += item.first.size();
+      const std::string& content = item.first;
+      if (!content.empty() && text.compare(position, content.size(), content) == 0) {
+        tokens.push_back(item.second);
+        position += content.size();
         matched = true;
         break;
       }
     }
     if (!matched) {
-      // 没有任何词条可匹配时，为当前 Unicode 字符输出一个 UNK。
-      result.push_back(unk_id_);
-      offset = NextUtf8Character(text, offset);
+      // 参考格式按字节回退：每个无法匹配的输入字节产生一个 UNK
+      tokens.push_back(unk_id_);
+      ++position;
     }
   }
-  return result;
+  return tokens;
 }
 
 std::string JsonVocabTokenizer::DecodeToken(int token) const {
-  // 越界 token 不抛异常，直接返回空串以便调用方安全处理损坏输入。
-  if (token < 0 || token >= static_cast<int>(id_to_entry_.size())) {
-    return {};
+  // 非法 ID 和稀疏词表中的空槽统一解码为未知 token
+  if (token < 0 || static_cast<size_t>(token) >= id_to_entry_.size() ||
+      id_to_entry_[token].content.empty()) {
+    return "<unk>";
   }
   return id_to_entry_[token].content;
 }
 
 std::string JsonVocabTokenizer::Decode(const std::vector<int>& tokens) const {
-  // 逐个调用 DecodeToken，拼接完整文本。
+  // 解码时保留传入的所有特殊 token，由上层决定是否过滤 BOS/EOS
   std::string result;
   for (int token : tokens) {
     result += DecodeToken(token);
   }
   return result;
+}
+
+std::unique_ptr<ITokenizer> CreateTokenizer(const std::string& vocab_path) {
+  // 路径有效时优先创建 JSON 分词器；格式错误同样安全回退到 ASCII
+  if (!vocab_path.empty() && std::filesystem::is_regular_file(vocab_path)) {
+    try {
+      return std::make_unique<JsonVocabTokenizer>(vocab_path);
+    } catch (const std::exception& error) {
+      std::cerr << "警告：加载 JSON 词表失败 '" << vocab_path
+                << "'，回退到 ASCII 分词器：" << error.what() << '\n';
+    }
+  }
+  return std::make_unique<AsciiTokenizer>();
 }
 
 }  // namespace mini_llama
