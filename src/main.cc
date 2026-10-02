@@ -93,9 +93,10 @@ GenerateOptions ParseGenerateOptions(int argc, const char* const argv[]) {
         throw std::invalid_argument("missing value for --prompt");
       }
       options.prompt = argv[index];
-    } else if (option == "--max-tokens" || option == "-n") {
+    } else if (option == "--max-tokens" || option == "--n-predict" ||
+               option == "-n") {
       if (++index >= argc) {
-        throw std::invalid_argument("missing value for --max-tokens");
+        throw std::invalid_argument("missing value for " + option);
       }
       options.max_tokens = ParseInt(argv[index], option);
       if (options.max_tokens <= 0) {
@@ -341,10 +342,14 @@ int RunInteractive(const MiniLlamaModel& model, const ITokenizer& tokenizer,
 // 输出两个运行模式共用的命令行帮助，不承担模型加载职责
 void PrintUsage(std::ostream& output) {
   output << "Usage:\n"
-         << "  mini-llama generate --model MODEL.gguf --prompt TEXT "
-            "[--max-tokens N] [--temperature FLOAT] [--top-k N] [--seed N]\n"
-         << "  mini-llama run --model MODEL.gguf [--prompt TEXT] "
-            "[--max-tokens N] [--temperature FLOAT] [--top-k N] [--seed N]\n"
+         << "  mini-llama generate --model MODEL_OR_DIRECTORY --prompt TEXT "
+            "[--max-tokens N|--n-predict N] [--temperature FLOAT] "
+            "[--top-k N] [--seed N]\n"
+         << "  mini-llama run --model MODEL_OR_DIRECTORY [--prompt TEXT] "
+            "[--max-tokens N|--n-predict N] [--temperature FLOAT] "
+            "[--top-k N] [--seed N]\n"
+         << "  Add --tokenizer TOKENIZER_DIRECTORY_OR_VOCAB_JSON to override "
+            "the GGUF tokenizer.\n"
          << "  mini-llama generate --config MODEL.json --weights MODEL.bin "
             "[--vocab VOCAB.json] --prompt TEXT [--max-tokens N]\n"
          << "  mini-llama inspect-gguf MODEL.gguf\n";
@@ -394,7 +399,7 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
 // 可注入流的运行入口用于交互运行和单元测试，统一处理命令行错误
 int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
         const ITokenizer& tokenizer, std::istream& input, std::ostream& output,
-        std::ostream& error) {
+        std::ostream& error, const std::string& chat_template) {
   try {
     if (argc > 1 && std::string(argv[1]) == "--help") {
       PrintUsage(output);
@@ -416,9 +421,9 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
     const GenerateOptions options =
         ParseGenerateOptions(argc - option_start, argv + option_start);
     if (mode == "run") {
-      // run 将控制权交给会话循环；generate 保持一次性输出语义
-      // 当前阶段使用 PromptBuilder 默认格式；后续模板来源只需在此处注入配置
-      const PromptBuilder prompt_builder;
+      // run 将控制权交给会话循环；generate 保持一次性输出语义。
+      PromptBuilder prompt_builder;
+      prompt_builder.SetChatTemplate(chat_template);
       return RunInteractive(model, tokenizer, options, prompt_builder, input,
                             output);
     }
@@ -432,21 +437,34 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
   }
 }
 
+int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
+        const ITokenizer& tokenizer, std::istream& input, std::ostream& output,
+        std::ostream& error) {
+  return Run(argc, argv, model, tokenizer, input, output, error, "");
+}
+
 namespace {
 
+// 进程级参数分为资源路径和传递给 generate/run 的运行参数；后者保留原始
+// argv 指针，避免再次拼装字符串存储
 struct LaunchOptions {
   std::string model_path;
   std::string config_path;
   std::string weights_path;
   std::string vocab_path;
+  std::string tokenizer_path;
   std::vector<const char*> forwarded_arguments;
 };
 
+// 模型、分词器和聊天模板必须来自同一次资源解析，防止运行阶段使用不匹配
+// 的配置
 struct LoadedResources {
   MiniLlamaModel model;
   std::unique_ptr<ITokenizer> tokenizer;
+  std::string chat_template;
 };
 
+// 读取带值的路径选项，并统一拒绝重复、缺值和空值
 void SetPathOption(std::string* destination, const std::string& option, int* index,
                    int argc, const char* const argv[]) {
   if (!destination->empty()) {
@@ -461,6 +479,7 @@ void SetPathOption(std::string* destination, const std::string& option, int* ind
   }
 }
 
+// 提取资源加载选项；未消费的参数原样转发给 Run 解析生成配置
 LaunchOptions ParseLaunchOptions(int argc, const char* const argv[]) {
   LaunchOptions options;
   options.forwarded_arguments.push_back(argv[0]);
@@ -474,6 +493,8 @@ LaunchOptions ParseLaunchOptions(int argc, const char* const argv[]) {
       SetPathOption(&options.weights_path, option, &index, argc, argv);
     } else if (option == "--vocab") {
       SetPathOption(&options.vocab_path, option, &index, argc, argv);
+    } else if (option == "--tokenizer") {
+      SetPathOption(&options.tokenizer_path, option, &index, argc, argv);
     } else {
       options.forwarded_arguments.push_back(argv[index]);
     }
@@ -481,6 +502,7 @@ LaunchOptions ParseLaunchOptions(int argc, const char* const argv[]) {
   return options;
 }
 
+// 扩展名比较忽略大小写，仅用于判断模型候选，不代替 GGUF 内容校验
 bool IsGgufPath(const std::string& path) {
   std::string extension = std::filesystem::path(path).extension().string();
   std::transform(extension.begin(), extension.end(), extension.begin(),
@@ -490,28 +512,127 @@ bool IsGgufPath(const std::string& path) {
   return extension == ".gguf";
 }
 
-LoadedResources LoadResources(const LaunchOptions& options) {
+// 装配层内部根据目录或 vocab.json 提示选择现有 tokenizer 工厂，不扩展
+// tokenizer 公共接口
+std::unique_ptr<ITokenizer> CreateTokenizerFromVocabHint(
+    const std::string& tokenizer_hint) {
+  namespace fs = std::filesystem;
+  if (tokenizer_hint.empty()) {
+    return nullptr;
+  }
+
+  std::error_code error;
+  fs::path hint(tokenizer_hint);
+  fs::path vocab_path = hint;
+  fs::path directory = hint.parent_path();
+  if (fs::is_directory(hint, error)) {
+    directory = hint;
+    vocab_path = directory / "vocab.json";
+  } else if (error) {
+    return nullptr;
+  }
+  if (!fs::is_regular_file(vocab_path, error) || error) {
+    return nullptr;
+  }
+
+  const fs::path merges_path = directory / "merges.txt";
+  if (fs::is_regular_file(merges_path, error) && !error) {
+    return CreateBpeTokenizer(vocab_path.string(), merges_path.string(),
+                              (directory / "special_tokens.json").string());
+  }
+  try {
+    return std::make_unique<JsonVocabTokenizer>(vocab_path.string());
+  } catch (const std::exception&) {
+    return nullptr;
+  }
+}
+
+// chat template 只参与命令行资源装配，直接复用已有 GGUF metadata 接口
+std::string LoadChatTemplateFromGguf(const std::string& gguf_path) {
+  std::string chat_template;
+  if (!GgufGetMetadataString(gguf_path, "tokenizer.chat_template", chat_template)) {
+    return {};
+  }
+  return chat_template;
+}
+
+std::filesystem::path ResolveGgufPath(const std::string& model_hint) {
+  // --model 既可以指向单个 GGUF，也可以指向只包含一个 GGUF 的目录
+  namespace fs = std::filesystem;
+  std::error_code error;
+  const fs::path hint(model_hint);
+  if (fs::is_regular_file(hint, error)) {
+    if (!IsGgufPath(hint.string())) {
+      throw std::invalid_argument("--model file must have a .gguf extension");
+    }
+    return hint;
+  }
+  if (error || !fs::is_directory(hint, error) || error) {
+    throw std::invalid_argument("model path does not exist: " + model_hint);
+  }
+
+  std::vector<fs::path> candidates;
+  // 目录中必须只有一个明确候选，避免依赖文件系统遍历顺序选择模型
+  for (fs::directory_iterator it(hint, error), end; !error && it != end;
+       it.increment(error)) {
+    if (it->is_regular_file(error) && !error && IsGgufPath(it->path().string())) {
+      candidates.push_back(it->path());
+    }
+  }
+  if (error) {
+    throw std::runtime_error("failed to inspect model directory: " + model_hint);
+  }
+  std::sort(candidates.begin(), candidates.end());
+  if (candidates.empty()) {
+    throw std::runtime_error("model directory contains no .gguf file: " +
+                             model_hint);
+  }
+  if (candidates.size() > 1) {
+    throw std::runtime_error("model directory contains multiple .gguf files: " +
+                             model_hint);
+  }
+  return candidates.front();
+}
+
+// 按命令行模式装配模型与 tokenizer：GGUF 优先读取内嵌 metadata，旧格式
+// 继续使用 manifest；显式 tokenizer 始终覆盖自动选择结果
+LoadedResources LoadModelAndTokenizer(const LaunchOptions& options) {
   LoadedResources resources;
   if (!options.model_path.empty()) {
+    // GGUF 路径不能与旧版 config/weights/vocab 参数混用
     if (!options.config_path.empty() || !options.weights_path.empty() ||
         !options.vocab_path.empty()) {
       throw std::invalid_argument(
           "--model cannot be combined with --config, --weights, or --vocab");
     }
-    if (!IsGgufPath(options.model_path)) {
-      throw std::invalid_argument(
-          "--model currently requires a .gguf file; use --config and --weights "
-          "for the legacy format");
-    }
-    resources.model = LoadGgufModel(options.model_path);
+    const std::filesystem::path model_path = ResolveGgufPath(options.model_path);
+    resources.model = LoadGgufModel(model_path.string());
     if (!resources.model.loaded) {
       throw std::runtime_error("failed to load GGUF model: " +
                                resources.model.load_error);
     }
-    resources.tokenizer = CreateGgufTokenizer(options.model_path);
-    if (!resources.tokenizer) {
-      throw std::runtime_error("failed to load tokenizer from GGUF model");
+    // 用户显式指定 tokenizer 时不读取 GGUF 内嵌 tokenizer metadata
+    if (!options.tokenizer_path.empty()) {
+      resources.tokenizer = CreateTokenizerFromVocabHint(options.tokenizer_path);
+      if (!resources.tokenizer) {
+        throw std::runtime_error("failed to load explicit tokenizer: " +
+                                 options.tokenizer_path);
+      }
+    } else {
+      resources.tokenizer = CreateGgufTokenizer(model_path.string());
     }
+    // 内嵌 metadata 缺失时，尝试同目录的 vocab.json/merges.txt 导出文件
+    if (!resources.tokenizer) {
+      const std::filesystem::path tokenizer_directory = model_path.parent_path();
+      resources.tokenizer =
+          CreateTokenizerFromVocabHint(tokenizer_directory.string());
+    }
+    if (!resources.tokenizer) {
+      throw std::runtime_error(
+          "GGUF has no tokenizer metadata and no vocab.json/merges.txt fallback");
+    }
+    // chat template 独立于 tokenizer 来源，始终从最终选定的 GGUF 读取
+    resources.chat_template = LoadChatTemplateFromGguf(model_path.string());
     return resources;
   }
 
@@ -527,12 +648,23 @@ LoadedResources LoadResources(const LaunchOptions& options) {
     throw std::runtime_error("failed to load model: " + resources.model.load_error);
   }
 
+  if (!options.tokenizer_path.empty()) {
+    // 旧格式同样允许显式 tokenizer 覆盖 manifest 中的配置
+    resources.tokenizer = CreateTokenizerFromVocabHint(options.tokenizer_path);
+    if (!resources.tokenizer) {
+      throw std::runtime_error("failed to load explicit tokenizer: " +
+                               options.tokenizer_path);
+    }
+    return resources;
+  }
+
   if (manifest.tokenizer.type == "ascii" && options.vocab_path.empty()) {
     resources.tokenizer = std::make_unique<AsciiTokenizer>();
     return resources;
   }
 
   std::filesystem::path vocab_path = options.vocab_path;
+  // 未显式提供 --vocab 时，相对于 manifest 所在目录解析词表路径
   if (vocab_path.empty()) {
     vocab_path = std::filesystem::path(options.config_path).parent_path() /
                  manifest.tokenizer.path;
@@ -545,6 +677,7 @@ LoadedResources LoadResources(const LaunchOptions& options) {
   return resources;
 }
 
+// 帮助选项在加载大型模型前处理，避免仅查看用法时产生昂贵 I/O
 bool HasHelpOption(int argc, const char* const argv[]) {
   for (int index = 1; index < argc; ++index) {
     if (std::string(argv[index]) == "--help" || std::string(argv[index]) == "-h") {
@@ -556,6 +689,7 @@ bool HasHelpOption(int argc, const char* const argv[]) {
 
 }  // namespace
 
+// 进程级入口负责帮助、GGUF 检查和资源装配，再将剩余参数交给运行层
 int RunMain(int argc, const char* const argv[], std::istream& input,
             std::ostream& output, std::ostream& error) {
   try {
@@ -564,6 +698,7 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
       return 0;
     }
 
+    // inspect-gguf 是独立的只读命令，不需要加载模型权重和 tokenizer
     if (std::string(argv[1]) == "inspect-gguf") {
       if (argc != 3) {
         throw std::invalid_argument(
@@ -579,18 +714,24 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
     }
 
     const LaunchOptions options = ParseLaunchOptions(argc, argv);
-    LoadedResources resources = LoadResources(options);
+    LoadedResources resources = LoadModelAndTokenizer(options);
     return Run(static_cast<int>(options.forwarded_arguments.size()),
                options.forwarded_arguments.data(), resources.model,
-               *resources.tokenizer, input, output, error);
+               *resources.tokenizer, input, output, error, resources.chat_template);
   } catch (const std::exception& exception) {
     error << exception.what() << '\n';
     return 1;
   }
 }
 
+// 默认入口绑定标准输入输出；可注入流的重载保留给测试和嵌入调用
 int RunMain(int argc, const char* const argv[]) {
   return RunMain(argc, argv, std::cin, std::cout, std::cerr);
 }
 
 }  // namespace mini_llama
+
+#ifdef MINI_LLAMA_BUILD_EXECUTABLE
+// 复用本文件已有的 RunMain 装配逻辑，避免为进程入口增加独立源文件。
+int main(int argc, char* argv[]) { return mini_llama::RunMain(argc, argv); }
+#endif

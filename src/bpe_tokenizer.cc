@@ -502,11 +502,12 @@ std::vector<int> BpeTokenizer::Encode(const std::string& text) const {
 }
 
 std::string BpeTokenizer::DecodeToken(int token) const {
-  // 单 token 解码仅返回词表中的内部字符串，不执行 byte-to-unicode 逆映射
-  if (token >= 0 && token < static_cast<int>(id_to_token_.size())) {
-    return id_to_token_[token];
+  // 流式生成逐 token 输出，因此这里也必须还原 GPT-2 byte-to-unicode
+  // 表示；否则空格 token 会显示成“Ġ”等内部符号。
+  if (token < 0 || token >= static_cast<int>(id_to_token_.size())) {
+    return "";
   }
-  return "";
+  return Decode({token});
 }
 
 std::string BpeTokenizer::Decode(const std::vector<int>& tokens) const {

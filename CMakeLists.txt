@@ -41,6 +41,21 @@ target_include_directories(mini_llama_core
     ${PROJECT_SOURCE_DIR}/include
 )
 
+# 命令行程序复用 src/main.cc；宏只在该目标中启用全局 main()
+add_executable(mini-llama
+  src/main.cc
+)
+
+target_compile_definitions(mini-llama
+  PRIVATE
+    MINI_LLAMA_BUILD_EXECUTABLE
+)
+
+target_link_libraries(mini-llama
+  PRIVATE
+    mini_llama_core
+)
+
 # 测试模块
 include(CTest)
 
