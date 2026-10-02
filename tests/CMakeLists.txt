@@ -44,6 +44,8 @@ add_unit_test(mini-llama-gguf-tokenizer-integration-tests gguf_tokenizer_test.cc
 add_unit_test(mini-llama-kv-cache-tests unit/kv_cache_test.cc)
 add_unit_test(mini-llama-radix-tree-tests unit/radix_tree_test.cc)
 add_unit_test(mini-llama-chat-tests unit/chat_test.cc)
+add_unit_test(mini-llama-chat-integration-tests chat_test.cc
+              "mini-llama-tests.")
 add_unit_test(mini-llama-request-context-tests unit/request_context_test.cc)
 add_unit_test(mini-llama-forward-tests unit/forward_test.cc)
 add_unit_test(mini-llama-sampler-tests unit/sampler_test.cc)
@@ -62,6 +64,11 @@ target_compile_definitions(mini-llama-loader-tests
 )
 
 target_compile_definitions(mini-llama-gguf-tokenizer-integration-tests
+  PRIVATE
+    MINI_LLAMA_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+
+target_compile_definitions(mini-llama-chat-integration-tests
   PRIVATE
     MINI_LLAMA_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )

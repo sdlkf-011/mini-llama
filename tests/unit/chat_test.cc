@@ -136,6 +136,65 @@ TEST(ChatTest, PromptBuilderFormatsPlainAndQwenPrompts) {
             "<|im_start|>assistant\n");
 }
 
+// 测试目的：纯文本模式在空历史、多轮、空内容和未知角色下
+// 仍产生字节级稳定的 assistant 生成前缀。
+TEST(ChatTest, PromptBuilderPlainModeHandlesBoundaries) {
+  PromptBuilder builder;
+  EXPECT_EQ(builder.Build({}), "Assistant: ");
+
+  const std::vector<ChatMessage> messages = {{"system", "rules"},
+                                             {"user", ""},
+                                             {"tool", "ignored"},
+                                             {"assistant", "answer"},
+                                             {"user", "again"}};
+  EXPECT_EQ(builder.Build(messages),
+            "System: rules\n"
+            "User: \n"
+            "Assistant: answer\n"
+            "User: again\n"
+            "Assistant: ");
+}
+
+// 测试目的：内置 Qwen2 仅在第一条是 system 时保留调用方
+// 设定；第一条非 system 时即使后续有 system 也必须注入默认设定。
+TEST(ChatTest, PromptBuilderQwen2UsesFirstMessageForSystemInjection) {
+  PromptBuilder builder;
+  builder.SetChatTemplate("qwen2");
+
+  EXPECT_EQ(builder.Build({}),
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>assistant\n");
+
+  EXPECT_EQ(builder.Build({{"user", "你好"}}),
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            "你好<|im_end|>\n"
+            "<|im_start|>assistant\n");
+
+  EXPECT_EQ(builder.Build({{"system", "custom"}, {"user", "hello"}}),
+            "<|im_start|>system\n"
+            "custom<|im_end|>\n"
+            "<|im_start|>user\n"
+            "hello<|im_end|>\n"
+            "<|im_start|>assistant\n");
+
+  EXPECT_EQ(builder.Build({{"user", "first"}, {"system", "late"}}),
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            "first<|im_end|>\n"
+            "<|im_start|>system\n"
+            "late<|im_end|>\n"
+            "<|im_start|>assistant\n");
+
+  EXPECT_EQ(builder.Build({{"tool", "ignored"}}),
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>assistant\n");
+}
+
 // 测试目的：验证轻量模板执行器支持消息循环、条件、逻辑运算、消息下标、
 // loop.first、add_generation_prompt、字符串拼接和 trim marker。
 TEST(ChatTest, PromptBuilderExecutesJinjaSubset) {
@@ -159,6 +218,33 @@ TEST(ChatTest, PromptBuilderExecutesJinjaSubset) {
             "assistant;user=hello");
 }
 
+// 测试目的：验证 GGUF 中常见的 Qwen2 Jinja 结构、双引号字面量、
+// 转义换行和带前置文本的模板都按预期执行。
+TEST(ChatTest, PromptBuilderExecutesQwen2StyleJinjaExactly) {
+  PromptBuilder builder;
+  builder.SetChatTemplate(
+      "{% for message in messages %}"
+      "{% if loop.first and messages[0][\"role\"] != \"system\" %}"
+      "{{ \"<|im_start|>system\\nYou are a helpful assistant.<|im_end|>\\n\" }}"
+      "{% endif %}"
+      "{{ '<|im_start|>' + message[\"role\"] + '\\n' + "
+      "message[\"content\"] + '<|im_end|>\\n' }}"
+      "{% endfor %}"
+      "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}");
+
+  EXPECT_EQ(builder.Build({{"user", "hello"}}),
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            "<|im_start|>user\n"
+            "hello<|im_end|>\n"
+            "<|im_start|>assistant\n");
+
+  builder.SetChatTemplate(
+      "prefix:{% if add_generation_prompt or messages[0]['role'] == 'system' "
+      "and messages[0]['content'] == 'no' %}ok{% endif %}");
+  EXPECT_EQ(builder.Build({{"user", "hello"}}), "prefix:ok");
+}
+
 // 测试目的：验证未知模板回退纯文本，且缺失闭合标签、非法下标等异常语法
 // 只产生可控结果，不发生越界访问或崩溃。
 TEST(ChatTest, PromptBuilderSafelyHandlesUnsupportedAndMalformedTemplates) {
@@ -170,6 +256,15 @@ TEST(ChatTest, PromptBuilderSafelyHandlesUnsupportedAndMalformedTemplates) {
   builder.SetChatTemplate(
       "{% if add_generation_prompt %}ok:{{ messages[bad]['role'] }}");
   EXPECT_NO_THROW(EXPECT_EQ(builder.Build(messages), "ok:"));
+
+  builder.SetChatTemplate("{% for message in messages %}{{ message['content'] }}");
+  EXPECT_NO_THROW(EXPECT_EQ(builder.Build(messages), "hello"));
+
+  builder.SetChatTemplate("{{ messages[0]['role'] }}");
+  EXPECT_NO_THROW(EXPECT_EQ(builder.Build({}), ""));
+
+  builder.SetChatTemplate("prefix{{");
+  EXPECT_NO_THROW(EXPECT_EQ(builder.Build(messages), "prefix"));
 }
 
 // 测试目的：验证 run 模式识别 /help、/stats、/clear、/exit，且 clear 后

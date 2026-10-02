@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -27,10 +28,9 @@ void Check(bool condition, const std::string& message) {
 class TemporaryDirectory {
  public:
   TemporaryDirectory() {
-    static int sequence = 0;
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     path_ = std::filesystem::temp_directory_path() /
-            ("mini_llama_tokenizer_test_" + std::to_string(++sequence));
-    std::filesystem::remove_all(path_);
+            ("mini_llama_tokenizer_test_" + std::to_string(unique));
     std::filesystem::create_directories(path_);
   }
 
@@ -241,7 +241,7 @@ TEST(TokenizerTest, GgufTokenizer) {
   WriteGguf(gguf, BpeTokens(), BpeMerges());
   GgufTokenizer tokenizer;
 
-  Check(tokenizer.Load(gguf.string()), "GGUF 加载失败");
+  ASSERT_TRUE(tokenizer.Load(gguf.string())) << "GGUF 加载失败";
   Check(tokenizer.vocab_size() == 12, "GGUF 词表大小错误");
   Check(
       tokenizer.bos_id() == 1 && tokenizer.eos_id() == 2 && tokenizer.unk_id() == 0,
@@ -266,6 +266,26 @@ TEST(TokenizerTest, GgufFactoryAndInvalidInput) {
   Check(valid != nullptr && valid->Decode(valid->Encode("hello")) == "hello",
         "GGUF 工厂创建结果错误");
   Check(invalid == nullptr, "无效 GGUF 应返回 nullptr");
+}
+
+// 未加载或重新加载失败后的对象不得访问未初始化的字节映射或旧词表。
+TEST(TokenizerTest, GgufTokenizerIsSafeWhenUnloaded) {
+  TemporaryDirectory directory;
+  const auto valid_path = directory.File("valid.gguf");
+  WriteGguf(valid_path, BpeTokens(), BpeMerges());
+
+  GgufTokenizer tokenizer;
+  EXPECT_TRUE(tokenizer.Encode("hello").empty());
+  EXPECT_TRUE(tokenizer.Decode({10}).empty());
+  EXPECT_TRUE(tokenizer.DecodeToken(10).empty());
+
+  ASSERT_TRUE(tokenizer.Load(valid_path.string()));
+  EXPECT_FALSE(tokenizer.Encode("hello").empty());
+
+  EXPECT_FALSE(tokenizer.Load(directory.File("missing.gguf").string()));
+  EXPECT_EQ(tokenizer.vocab_size(), 0);
+  EXPECT_TRUE(tokenizer.Encode("hello").empty());
+  EXPECT_TRUE(tokenizer.Decode({10}).empty());
 }
 
 }  // namespace
