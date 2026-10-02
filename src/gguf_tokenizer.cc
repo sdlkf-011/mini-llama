@@ -2,210 +2,59 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstring>
-#include <fstream>
+#include <limits>
 #include <sstream>
+
+#include "mini_llama/gguf.h"
 
 namespace mini_llama {
 namespace {
 
-// GGUF 文件采用小端二进制布局，此读取器集中处理边界检查和游标移动。
-class Reader {
- public:
-  explicit Reader(const std::vector<uint8_t>& bytes) : bytes_(bytes) {}
-
-  size_t remaining() const { return bytes_.size() - position_; }
-
-  bool Read(void* destination, size_t size) {
-    // 每次读取前检查剩余长度，防止损坏文件造成越界访问。
-    if (size > remaining()) {
-      return false;
-    }
-    std::memcpy(destination, bytes_.data() + position_, size);
-    position_ += size;
-    return true;
+// 从当前位置读取一个 UTF-8 码点；非法或不完整序列跳过一个字节
+std::string NextUtf8Codepoint(const std::string& text, size_t* position) {
+  if (*position >= text.size()) {
+    return {};
   }
 
-  template <typename T>
-  bool Scalar(T* value) {
-    return Read(value, sizeof(T));
+  const unsigned char first = text[*position];
+  size_t length = 1;
+  if ((first & 0x80) == 0) {
+    length = 1;
+  } else if ((first & 0xe0) == 0xc0) {
+    length = 2;
+  } else if ((first & 0xf0) == 0xe0) {
+    length = 3;
+  } else if ((first & 0xf8) == 0xf0) {
+    length = 4;
+  } else {
+    ++(*position);
+    return {};
+  }
+  if (*position + length > text.size()) {
+    ++(*position);
+    return {};
   }
 
-  bool String(std::string* value) {
-    // GGUF 字符串由 uint64 长度和紧随其后的原始字节组成。
-    uint64_t length = 0;
-    if (!Scalar(&length) || length > remaining()) {
-      return false;
-    }
-    value->assign(reinterpret_cast<const char*>(bytes_.data() + position_),
-                  static_cast<size_t>(length));
-    position_ += static_cast<size_t>(length);
-    return true;
-  }
-
-  bool Skip(size_t size) {
-    if (size > remaining()) {
-      return false;
-    }
-    position_ += size;
-    return true;
-  }
-
-  bool ArrayHeader(uint32_t* type, uint64_t* count) {
-    // 数组头记录元素类型和元素数量。
-    return Scalar(type) && Scalar(count);
-  }
-
- private:
-  const std::vector<uint8_t>& bytes_;
-  size_t position_ = 0;
-};
-
-enum ValueType : uint32_t {
-  kUint8 = 0,
-  kInt8 = 1,
-  kUint16 = 2,
-  kInt16 = 3,
-  kUint32 = 4,
-  kInt32 = 5,
-  kFloat32 = 6,
-  kBool = 7,
-  kString = 8,
-  kArray = 9,
-  kUint64 = 10,
-  kInt64 = 11,
-  kFloat64 = 12
-};
-
-// 读取 GGUF 元数据中的整数，并统一转换为接口所需的 int。
-bool ReadInteger(Reader* reader, uint32_t type, int* value) {
-  switch (type) {
-    case kUint8: {
-      uint8_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = v;
-      return true;
-    }
-    case kInt8: {
-      int8_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = v;
-      return true;
-    }
-    case kUint16: {
-      uint16_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = static_cast<int>(v);
-      return true;
-    }
-    case kInt16: {
-      int16_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = v;
-      return true;
-    }
-    case kUint32: {
-      uint32_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = static_cast<int>(v);
-      return true;
-    }
-    case kInt32: {
-      int32_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = v;
-      return true;
-    }
-    case kUint64: {
-      uint64_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = static_cast<int>(v);
-      return true;
-    }
-    case kInt64: {
-      int64_t v;
-      if (!reader->Scalar(&v)) {
-        return false;
-      }
-      *value = static_cast<int>(v);
-      return true;
-    }
-    default:
-      return false;
-  }
-}
-
-bool SkipValue(Reader* reader, uint32_t type) {
-  // 跳过暂时不关心的元数据，保证后续键值仍从正确偏移读取。
-  switch (type) {
-    case kUint8:
-    case kInt8:
-    case kBool:
-      return reader->Skip(1);
-    case kUint16:
-    case kInt16:
-      return reader->Skip(2);
-    case kUint32:
-    case kInt32:
-    case kFloat32:
-      return reader->Skip(4);
-    case kUint64:
-    case kInt64:
-    case kFloat64:
-      return reader->Skip(8);
-    case kString: {
-      std::string ignored;
-      return reader->String(&ignored);
-    }
-    case kArray: {
-      // 数组元素可能仍是复合类型，因此递归跳过每个元素。
-      uint32_t element_type;
-      uint64_t count;
-      if (!reader->ArrayHeader(&element_type, &count) ||
-          count > reader->remaining()) {
-        return false;
-      }
-      for (uint64_t i = 0; i < count; ++i) {
-        if (!SkipValue(reader, element_type)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    default:
-      return false;
-  }
+  std::string codepoint = text.substr(*position, length);
+  *position += length;
+  return codepoint;
 }
 
 bool IsSpecial(const std::string& token) {
-  // 尖括号 token 视为特殊字符串，十六进制字节 token 除外。
+  // 尖括号 token 视为特殊字符串，十六进制字节 token 除外
   return token.size() >= 2 && token.front() == '<' && token.back() == '>' &&
          token.find("<0x") != 0;
 }
 
 std::vector<std::string> SplitText(const std::string& text) {
-  // 使用轻量规则完成预分词，降低 GGUF tokenizer 的运行时依赖。
+  // 使用轻量规则完成预分词，降低 GGUF tokenizer 的运行时依赖
   std::vector<std::string> chunks;
   size_t position = 0;
 
   while (position < text.size()) {
     size_t start = position;
     if (std::isspace(static_cast<unsigned char>(text[position]))) {
-      // 保留连续空白，并将末尾单个空格附着到后续片段。
+      // 保留连续空白，并将末尾单个空格附着到后续片段
       while (position < text.size() &&
              std::isspace(static_cast<unsigned char>(text[position]))) {
         ++position;
@@ -232,7 +81,7 @@ std::vector<std::string> SplitText(const std::string& text) {
     }
     const unsigned char current = static_cast<unsigned char>(text[position]);
     if (std::isalnum(current) || current >= 0x80) {
-      // 字母数字和 UTF-8 非 ASCII 字节作为普通文本连续收集。
+      // 字母数字和 UTF-8 非 ASCII 字节作为普通文本连续收集
       ++position;
       while (position < text.size()) {
         const unsigned char c = static_cast<unsigned char>(text[position]);
@@ -242,7 +91,7 @@ std::vector<std::string> SplitText(const std::string& text) {
         ++position;
       }
     } else {
-      // 连续标点独立成段，避免跨类型产生不符合预分词规则的合并。
+      // 连续标点独立成段，避免跨类型产生不符合预分词规则的合并
       ++position;
       while (position < text.size() &&
              !std::isspace(static_cast<unsigned char>(text[position])) &&
@@ -259,7 +108,7 @@ std::vector<std::string> SplitText(const std::string& text) {
 }  // namespace
 
 void GgufTokenizer::BuildByteMappings() {
-  // 构造 GPT-2 风格的字节到 Unicode 映射及其逆映射。
+  // 构造 GPT-2 风格的字节到 Unicode 映射及其逆映射
   b2u_.resize(256);
   u2b_.clear();
   std::vector<bool> direct(256, false);
@@ -275,7 +124,7 @@ void GgufTokenizer::BuildByteMappings() {
 
   int extra = 256;
   for (int c = 0; c < 256; ++c) {
-    // 为全部 256 个字节生成唯一且可逆的 Unicode 表示。
+    // 为全部 256 个字节生成唯一且可逆的 Unicode 表示
     int codepoint = direct[c] ? c : extra++;
     std::string symbol;
     if (codepoint <= 0x7f) {
@@ -294,92 +143,41 @@ void GgufTokenizer::BuildByteMappings() {
 }
 
 bool GgufTokenizer::Load(const std::string& gguf_path) {
-  // 加载新模型前清理旧元数据，确保失败或重载不会混入旧词表内容。
+  // 加载新模型前清理旧元数据，确保失败或重载不会混入旧词表内容
   vocab_.clear();
   id_to_token_.clear();
   merge_ranks_.clear();
   special_tokens_.clear();
   bos_id_ = eos_id_ = unk_id_ = -1;
-  std::ifstream input(gguf_path, std::ios::binary);
-  if (!input) {
+  // 只扫描 GGUF 元数据，不把可能数 GB 的张量数据读入内存
+  std::vector<std::string> tokens;
+  std::vector<std::string> merges;
+  if (!GgufGetMetadataStringArray(gguf_path, "tokenizer.ggml.tokens", tokens) ||
+      tokens.empty()) {
     return false;
   }
-  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-  Reader reader(bytes);
-  char magic[4];
-  uint32_t version;
-  uint64_t tensor_count, metadata_count;
-  if (!reader.Read(magic, 4) || std::memcmp(magic, "GGUF", 4) != 0 ||
-      !reader.Scalar(&version) || version < 1 || version > 3 ||
-      !reader.Scalar(&tensor_count) || !reader.Scalar(&metadata_count)) {
-    return false;
-  }
+  // merges 对 unigram/字符词表可以不存在；BPE 模型则按元数据顺序使用
+  GgufGetMetadataStringArray(gguf_path, "tokenizer.ggml.merges", merges);
 
-  // 依次读取 GGUF 元数据；词表和合并表是 BPE 编码的必要数据。
-  (void)tensor_count;
-  std::vector<std::string> tokens, merges;
-  for (uint64_t index = 0; index < metadata_count; ++index) {
-    std::string key;
-    uint32_t type;
-    if (!reader.String(&key) || !reader.Scalar(&type)) {
+  auto read_token_id = [&](const std::string& key, int* destination) {
+    int64_t value = 0;
+    if (!GgufGetMetadataInt(gguf_path, key, value)) {
       return false;
     }
-    if (key == "tokenizer.ggml.tokens" && type == kArray) {
-      // tokenizer.ggml.tokens 按数组下标直接定义 token ID。
-      uint32_t element_type;
-      uint64_t count;
-      if (!reader.ArrayHeader(&element_type, &count) || element_type != kString) {
-        return false;
-      }
-      tokens.reserve(static_cast<size_t>(count));
-      for (uint64_t i = 0; i < count; ++i) {
-        std::string token;
-        if (!reader.String(&token)) {
-          return false;
-        }
-        tokens.push_back(std::move(token));
-      }
-    } else if (key == "tokenizer.ggml.merges" && type == kArray) {
-      // tokenizer.ggml.merges 的数组顺序即 BPE 合并优先级。
-      uint32_t element_type;
-      uint64_t count;
-      if (!reader.ArrayHeader(&element_type, &count) || element_type != kString) {
-        return false;
-      }
-      merges.reserve(static_cast<size_t>(count));
-      for (uint64_t i = 0; i < count; ++i) {
-        std::string merge;
-        if (!reader.String(&merge)) {
-          return false;
-        }
-        merges.push_back(std::move(merge));
-      }
-    } else if (key == "tokenizer.ggml.bos_token_id" ||
-               key == "tokenizer.ggml.eos_token_id" ||
-               key == "tokenizer.ggml.unknown_token_id" ||
-               key == "tokenizer.ggml.unk_token_id") {
-      // 控制 token ID 在不同 GGUF 生成器中可能采用多种整数宽度。
-      int value;
-      if (!ReadInteger(&reader, type, &value)) {
-        return false;
-      }
-      if (key.find("bos") != std::string::npos) {
-        bos_id_ = value;
-      } else if (key.find("eos") != std::string::npos) {
-        eos_id_ = value;
-      } else {
-        unk_id_ = value;
-      }
-    } else if (!SkipValue(&reader, type)) {
-      // 张量描述之外的其他元数据与分词无关，但仍需正确跳过。
+    if (value < std::numeric_limits<int>::min() ||
+        value > std::numeric_limits<int>::max()) {
       return false;
     }
-  }
-  if (tokens.empty()) {
-    return false;
+    *destination = static_cast<int>(value);
+    return true;
+  };
+  read_token_id("tokenizer.ggml.bos_token_id", &bos_id_);
+  read_token_id("tokenizer.ggml.eos_token_id", &eos_id_);
+  if (!read_token_id("tokenizer.ggml.unknown_token_id", &unk_id_)) {
+    read_token_id("tokenizer.ggml.unk_token_id", &unk_id_);
   }
 
-  // 建立 token 内容到 ID 的索引，并解析合并规则的优先级。
+  // 建立 token 内容到 ID 的索引，并解析合并规则的优先级
   id_to_token_ = std::move(tokens);
   vocab_.clear();
   for (int id = 0; id < static_cast<int>(id_to_token_.size()); ++id) {
@@ -398,18 +196,18 @@ bool GgufTokenizer::Load(const std::string& gguf_path) {
   special_tokens_.clear();
 
   for (int id = 0; id < static_cast<int>(id_to_token_.size()); ++id) {
-    // 同时识别特殊 token 和常见控制 token 别名。
+    // 同时识别特殊 token 和常见控制 token 别名
     const std::string& token = id_to_token_[id];
     if (IsSpecial(token)) {
       special_tokens_.emplace_back(token, id);
     }
-    if (token == "<unk>" || token == "<UNK>") {
+    if (unk_id_ < 0 && (token == "<unk>" || token == "<UNK>")) {
       unk_id_ = id;
     }
-    if (token == "<bos>" || token == "<s>") {
+    if (bos_id_ < 0 && (token == "<bos>" || token == "<s>")) {
       bos_id_ = id;
     }
-    if (token == "<eos>" || token == "</s>") {
+    if (eos_id_ < 0 && (token == "<eos>" || token == "</s>")) {
       eos_id_ = id;
     }
   }
@@ -423,7 +221,7 @@ std::vector<int> GgufTokenizer::Encode(const std::string& text) const {
   std::vector<int> result;
   size_t offset = 0;
   while (offset < text.size()) {
-    // GGUF 与独立 BPE 词表一样，必须先匹配特殊字符串。
+    // GGUF 与独立 BPE 词表一样，必须先匹配特殊字符串
     bool matched_special = false;
     for (const auto& special : special_tokens_) {
       if (text.compare(offset, special.first.size(), special.first) == 0) {
@@ -438,7 +236,7 @@ std::vector<int> GgufTokenizer::Encode(const std::string& text) const {
     }
 
     size_t end = offset + 1;
-    // 普通文本段截止到下一个特殊 token，避免特殊内容参与 BPE。
+    // 普通文本段截止到下一个特殊 token，避免特殊内容参与 BPE
     while (end < text.size()) {
       bool special = false;
       for (const auto& item : special_tokens_) {
@@ -454,14 +252,14 @@ std::vector<int> GgufTokenizer::Encode(const std::string& text) const {
     }
 
     for (const std::string& chunk : SplitText(text.substr(offset, end - offset))) {
-      // 对预分词片段反复执行最高优先级合并，直到不存在可合并相邻符号。
+      // 对预分词片段反复执行最高优先级合并，直到不存在可合并相邻符号
       std::vector<std::string> symbols;
       for (unsigned char byte : chunk) {
         symbols.push_back(b2u_[byte]);
       }
 
       while (symbols.size() > 1) {
-        // 每轮仅合并 rank 最小的相邻符号对。
+        // 每轮仅合并 rank 最小的相邻符号对
         int best_rank = -1;
         size_t best = 0;
         for (size_t i = 0; i + 1 < symbols.size(); ++i) {
@@ -480,7 +278,7 @@ std::vector<int> GgufTokenizer::Encode(const std::string& text) const {
       }
 
       for (const std::string& symbol : symbols) {
-        // GGUF 词表不包含最终符号时回退到 UNK ID。
+        // GGUF 词表不包含最终符号时回退到 UNK ID
         auto it = vocab_.find(symbol);
         result.push_back(it == vocab_.end() ? unk_id_ : it->second);
       }
@@ -491,45 +289,41 @@ std::vector<int> GgufTokenizer::Encode(const std::string& text) const {
 }
 
 std::string GgufTokenizer::DecodeToken(int token) const {
-  // 将 GPT-2 Unicode 字节符号还原为原始 UTF-8 字节。
   if (token < 0 || token >= static_cast<int>(id_to_token_.size())) {
     return {};
   }
-  const std::string& value = id_to_token_[token];
-  std::string result;
-
-  for (size_t position = 0; position < value.size();) {
-    // 从最长候选开始查询逆映射，未命中的普通 Unicode 内容原样追加。
-    bool found = false;
-    for (size_t length = std::min<size_t>(4, value.size() - position); length > 0;
-         --length) {
-      auto it = u2b_.find(value.substr(position, length));
-      if (it != u2b_.end()) {
-        result.push_back(static_cast<char>(it->second));
-        position += length;
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      result += value.substr(position);
-      break;
-    }
-  }
-  return result;
+  return Decode({token});
 }
 
 std::string GgufTokenizer::Decode(const std::vector<int>& tokens) const {
-  // 顺序拼接 token 解码结果，恢复完整字符串。
-  std::string result;
+  // 先拼接全部 token 的内部字符串，再整体执行 byte-to-unicode 逆映射。
+  // 这样跨 token 的原始 UTF-8 字节会在最终字符串中保持正确顺序
+  std::string text;
   for (int token : tokens) {
-    result += DecodeToken(token);
+    if (token >= 0 && token < static_cast<int>(id_to_token_.size())) {
+      text += id_to_token_[token];
+    }
+  }
+
+  std::string result;
+  size_t position = 0;
+  while (position < text.size()) {
+    const std::string codepoint = NextUtf8Codepoint(text, &position);
+    if (codepoint.empty()) {
+      continue;
+    }
+    const auto byte = u2b_.find(codepoint);
+    if (byte != u2b_.end()) {
+      result.push_back(static_cast<char>(byte->second));
+    } else {
+      result += codepoint;
+    }
   }
   return result;
 }
 
 std::unique_ptr<ITokenizer> CreateGgufTokenizer(const std::string& gguf_path) {
-  // GGUF 校验或元数据解析失败时返回 nullptr。
+  // GGUF 校验或元数据解析失败时返回 nullptr
   auto tokenizer = std::make_unique<GgufTokenizer>();
   if (!tokenizer->Load(gguf_path)) {
     return nullptr;
