@@ -169,8 +169,9 @@ GGUF 同目录存在多个 `.gguf` 时会拒绝自动选择，避免结果依赖
 ## Chat template
 
 运行路径从最终选定的 GGUF 读取 `tokenizer.chat_template`，并在 `run` 模式中
-注入 `PromptBuilder`。模板读取失败时保持空模板，由 `PromptBuilder` 使用现有
-纯文本回退格式。
+注入 `PromptBuilder`。该键缺失且 `general.architecture == "qwen2"` 时返回
+`qwen2` 内置 fallback 标记；其他缺失或读取失败场景保持空模板，由
+`PromptBuilder` 使用纯文本回退格式。
 
 导出的 `chat_template.txt` 主要用于检查和外部工具消费；当前显式
 `--tokenizer` 路径仍从模型 GGUF 获取运行时 chat template。
@@ -195,8 +196,8 @@ GGUF 同目录存在多个 `.gguf` 时会拒绝自动选择，避免结果依赖
 | vocab size | 151936 |
 | BOS token ID | 151643 |
 | EOS token ID | 151645 |
-| `<|im_start|>` | 151644 |
-| `<|im_end|>` | 151645 |
+| `&lt;\|im_start\|&gt;` | 151644 |
+| `&lt;\|im_end\|&gt;` | 151645 |
 
 ## 构建与验收命令
 
@@ -213,7 +214,8 @@ cmake --build build -j2
 ctest --test-dir build/ -R mini-llama-tests --output-on-failure
 ```
 
-当前注册 6 项 GGUF tokenizer 集成测试，全部通过。
+当前注册 6 项 GGUF tokenizer 集成测试和 7 项 Chat Template 集成
+测试；`mini-llama-tests` 共 13 项，全部通过。
 
 使用真实 Qwen2 模型生成一个 token：
 

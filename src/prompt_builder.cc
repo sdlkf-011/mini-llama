@@ -66,12 +66,38 @@ std::string EvalExpr(const std::string& expression_raw, const EvalContext& conte
       break;
     }
 
-    // 单引号内容直接作为字符串字面量，不再进行变量解析
-    if (expression[position] == '\'') {
+    // 引号内容作为字符串字面量，并处理模板中常用的转义字符
+    if (expression[position] == '\'' || expression[position] == '"') {
+      const char quote = expression[position];
       ++position;
       std::string literal;
-      while (position < expression.size() && expression[position] != '\'') {
-        literal += expression[position++];
+      while (position < expression.size() && expression[position] != quote) {
+        if (expression[position] == '\\' && position + 1 < expression.size()) {
+          const char escaped = expression[position + 1];
+          switch (escaped) {
+            case 'n':
+              literal += '\n';
+              break;
+            case 'r':
+              literal += '\r';
+              break;
+            case 't':
+              literal += '\t';
+              break;
+            case '\\':
+            case '\'':
+            case '"':
+              literal += escaped;
+              break;
+            default:
+              literal += '\\';
+              literal += escaped;
+              break;
+          }
+          position += 2;
+        } else {
+          literal += expression[position++];
+        }
       }
       if (position < expression.size()) {
         ++position;
@@ -80,7 +106,7 @@ std::string EvalExpr(const std::string& expression_raw, const EvalContext& conte
     } else {
       const size_t start = position;
       while (position < expression.size() && expression[position] != '+' &&
-             expression[position] != '\'') {
+             expression[position] != '\'' && expression[position] != '"') {
         if (expression[position] == '[') {
           ++position;
           while (position < expression.size() && expression[position] != ']') {
@@ -94,7 +120,8 @@ std::string EvalExpr(const std::string& expression_raw, const EvalContext& conte
           while (position < expression.size() &&
                  !std::isspace(static_cast<unsigned char>(expression[position])) &&
                  expression[position] != '+' && expression[position] != '\'' &&
-                 expression[position] != '[' && expression[position] != '.') {
+                 expression[position] != '"' && expression[position] != '[' &&
+                 expression[position] != '.') {
             ++position;
           }
         } else {
@@ -176,6 +203,32 @@ std::string EvalExpr(const std::string& expression_raw, const EvalContext& conte
   return result;
 }
 
+// 定位字符串字面量之外的条件运算符，避免误分割引号内容
+size_t FindConditionOperator(const std::string& condition,
+                             const std::string& operation) {
+  char quote = '\0';
+  for (size_t position = 0; position + operation.size() <= condition.size();
+       ++position) {
+    const char character = condition[position];
+    if (quote != '\0') {
+      if (character == '\\' && position + 1 < condition.size()) {
+        ++position;
+      } else if (character == quote) {
+        quote = '\0';
+      }
+      continue;
+    }
+    if (character == '\'' || character == '"') {
+      quote = character;
+      continue;
+    }
+    if (condition.compare(position, operation.size(), operation) == 0) {
+      return position;
+    }
+  }
+  return std::string::npos;
+}
+
 // 计算相等、逻辑与、逻辑或以及单变量条件
 bool EvalCondition(const std::string& condition_raw, const EvalContext& context) {
   const std::string condition = Trim(condition_raw);
@@ -183,26 +236,26 @@ bool EvalCondition(const std::string& condition_raw, const EvalContext& context)
     return false;
   }
 
-  // 逻辑运算通过递归拆分，子条件仍复用本函数的比较和变量规则
-  const size_t and_position = condition.find(" and ");
-  if (and_position != std::string::npos) {
-    return EvalCondition(condition.substr(0, and_position), context) &&
-           EvalCondition(condition.substr(and_position + 5), context);
-  }
-
-  const size_t or_position = condition.find(" or ");
+  // 先拆分低优先级的 or，使 and 按 Jinja2 常规优先级求值
+  const size_t or_position = FindConditionOperator(condition, " or ");
   if (or_position != std::string::npos) {
     return EvalCondition(condition.substr(0, or_position), context) ||
            EvalCondition(condition.substr(or_position + 4), context);
   }
 
-  const size_t not_equal_position = condition.find(" != ");
+  const size_t and_position = FindConditionOperator(condition, " and ");
+  if (and_position != std::string::npos) {
+    return EvalCondition(condition.substr(0, and_position), context) &&
+           EvalCondition(condition.substr(and_position + 5), context);
+  }
+
+  const size_t not_equal_position = FindConditionOperator(condition, " != ");
   if (not_equal_position != std::string::npos) {
     return EvalExpr(condition.substr(0, not_equal_position), context) !=
            EvalExpr(condition.substr(not_equal_position + 4), context);
   }
 
-  const size_t equal_position = condition.find(" == ");
+  const size_t equal_position = FindConditionOperator(condition, " == ");
   if (equal_position != std::string::npos) {
     return EvalExpr(condition.substr(0, equal_position), context) ==
            EvalExpr(condition.substr(equal_position + 4), context);
@@ -406,8 +459,8 @@ std::string PromptBuilder::Build(const std::vector<ChatMessage>& messages) const
   if (chat_template_ == "qwen2") {
     return BuildQwen2(messages);
   }
-  if (chat_template_.size() >= 2 && chat_template_[0] == '{' &&
-      (chat_template_[1] == '%' || chat_template_[1] == '{')) {
+  if (chat_template_.find("{%") != std::string::npos ||
+      chat_template_.find("{{") != std::string::npos) {
     return ExecuteTemplate(CompileTemplate(chat_template_), messages, true);
   }
   return BuildPlain(messages);
@@ -432,17 +485,9 @@ std::string PromptBuilder::BuildPlain(
 
 std::string PromptBuilder::BuildQwen2(
     const std::vector<ChatMessage>& messages) const {
-  // Qwen2 在缺少系统消息时补充默认设定，保持其内置模板语义
+  // Qwen2 在首条非 system 时补充默认设定，保持其内置模板语义
   std::string prompt;
-  bool has_system_message = false;
-  for (const ChatMessage& message : messages) {
-    if (message.role == "system") {
-      has_system_message = true;
-      break;
-    }
-  }
-
-  if (!has_system_message) {
+  if (messages.empty() || messages.front().role != "system") {
     prompt += "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n";
   }
 

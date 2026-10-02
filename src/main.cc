@@ -547,14 +547,34 @@ std::unique_ptr<ITokenizer> CreateTokenizerFromVocabHint(
   }
 }
 
-// chat template 只参与命令行资源装配，直接复用已有 GGUF metadata 接口
+}  // namespace
+
+// chat template 只参与命令行资源装配；一次解析同时取得模板和架构
 std::string LoadChatTemplateFromGguf(const std::string& gguf_path) {
-  std::string chat_template;
-  if (!GgufGetMetadataString(gguf_path, "tokenizer.chat_template", chat_template)) {
+  GgufReader reader;
+  if (!reader.Load(gguf_path)) {
     return {};
   }
-  return chat_template;
+
+  const GgufMetadataKv* architecture = nullptr;
+  for (const GgufMetadataKv& item : reader.metadata) {
+    if (item.key == "tokenizer.chat_template") {
+      // 键存在时优先返回原始字符串，包括合法的空模板
+      return item.type == kGgufTypeString ? item.value_str : std::string();
+    }
+    if (item.key == "general.architecture") {
+      architecture = &item;
+    }
+  }
+
+  if (architecture != nullptr && architecture->type == kGgufTypeString &&
+      architecture->value_str == "qwen2") {
+    return "qwen2";
+  }
+  return {};
 }
+
+namespace {
 
 std::filesystem::path ResolveGgufPath(const std::string& model_hint) {
   // --model 既可以指向单个 GGUF，也可以指向只包含一个 GGUF 的目录
