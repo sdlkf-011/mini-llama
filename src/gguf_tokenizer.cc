@@ -218,6 +218,9 @@ bool GgufTokenizer::Load(const std::string& gguf_path) {
 }
 
 std::vector<int> GgufTokenizer::Encode(const std::string& text) const {
+  if (id_to_token_.empty() || b2u_.size() != 256) {
+    return {};
+  }
   std::vector<int> result;
   size_t offset = 0;
   while (offset < text.size()) {

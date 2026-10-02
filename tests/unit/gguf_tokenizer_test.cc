@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -24,10 +25,9 @@ using mini_llama::GgufTokenizer;
 class TemporaryDirectory {
  public:
   TemporaryDirectory() {
-    static int sequence = 0;
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     path_ = std::filesystem::temp_directory_path() /
-            ("mini_llama_gguf_test_" + std::to_string(++sequence));
-    std::filesystem::remove_all(path_);
+            ("mini_llama_gguf_test_" + std::to_string(unique));
     std::filesystem::create_directories(path_);
   }
 
