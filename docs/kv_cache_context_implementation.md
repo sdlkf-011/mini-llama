@@ -1,5 +1,8 @@
 # KV Cache、推理上下文与前向推理阶段实现汇总
 
+> 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
+> 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
+
 本阶段（`feature/kv_cache-and-context`）在 Tensor、基础算子和 Tokenizer 的基础上，补充了模型结构、批处理、KV Cache、压缩前缀树、请求追踪以及单 token/批量前向推理能力。实现面向教学用途，当前使用 CPU 上的 F32 张量，同时为后续量化和 GPU 后端保留了包装层接口。
 
 ## 实现范围

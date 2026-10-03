@@ -1,5 +1,8 @@
 # Sampler、采样策略与生成入口阶段实现汇总
 
+> 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
+> 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
+
 本阶段（`feature/sampler-sampling-strategy`）在已有 Tensor、Tokenizer、推理上下文和前向传播能力上，补充了采样参数、贪心采样、温度采样、Top-k 采样，以及把采样参数接入当前生成流程的基础入口。实现保持在现有项目接口范围内，没有提前引入尚未完成的模型加载、Chat、PromptBuilder、终端交互或后端选择模块。
 
 ## 实现范围

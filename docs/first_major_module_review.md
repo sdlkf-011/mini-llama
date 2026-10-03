@@ -16,7 +16,7 @@ Logits 采样
 Token 解码与文本输出
 ```
 
-它已经具备单轮生成和多轮聊天所需的核心组件，但目前仍是一个核心库，而不是完整的最终产品：仓库没有进程级 `main()`，模型加载、分词器创建和 `Run()` 之间仍需要上层调用方做最后的装配。
+当前同时构建核心库和 `mini-llama` 可执行程序。`RunMain()` 已统一装配模型、分词器和聊天模板，并接入单轮生成、多轮聊天及请求追踪。当前入口约定见[命令行与模块同步说明](cli_integration_status.md)。
 
 ## 1. 先记住全局分层
 
@@ -31,7 +31,7 @@ Token 解码与文本输出
 | 生成策略层 | `sampler` | 根据 logits 选择下一个 token |
 | 应用编排层 | `PromptBuilder`、`ChatSession`、`Terminal`、`main.cc` | 拼接对话、驱动生成循环、管理多轮状态并输出文本 |
 
-辅助模块 `RadixTree` 用于记录已计算的 token 前缀，`RequestContext` 用于请求级追踪。前者已经接入聊天前缀复用，后者目前还是独立能力，尚未接入 `Run()` 主链路。
+辅助模块 `RadixTree` 已接入聊天前缀复用，`RequestContext` 已接入 CLI 的生成流程和每轮聊天，记录阶段事件、token 数及成功或失败状态。
 
 ## 2. 模块关系总图
 
@@ -300,14 +300,15 @@ Sampler 不知道文本、上下文或 EOS 的含义。EOS 判断由上层生成
 
 `src/main.cc` 是当前大模块的编排中心：
 
-- `Generate()` 执行一次性文本生成。
-- `Run()` 解析 `generate` / `run` 模式和采样参数。
-- `RunInteractive()` 驱动多轮输入。
+- `RunMain()` 处理进程级命令、帮助、资源装配和请求收尾。
+- `ParseOptions()` 统一解析命令和参数，`ResolveModelPaths()` 解析实际模型文件。
+- `GenerateTokens()` 执行单轮生成；`RunGenerate()` 展示结果，`Generate()` 保留库调用接口。
+- `Run()` 接收调用方已准备的模型和分词器；`RunChat()` 驱动多轮输入。
 - `RunChatTurn()` 完成一轮聊天的 prompt、prefill、decode、输出和状态更新。
 
-虽然文件名是 `main.cc`，它并没有定义全局 `main()`，也不加载模型。调用方必须先准备好 `MiniLlamaModel` 和 `ITokenizer`，再调用这里的入口。
+`src/main.cc` 通过 `MINI_LLAMA_BUILD_EXECUTABLE` 仅在可执行目标启用全局 `main()`。CLI 经由 `RunMain()` 加载资源；库调用仍可直接传入 `MiniLlamaModel` 和 `ITokenizer`。
 
-`RequestContext` 可以记录模型加载、tokenize、prefill、decode、sample 等阶段耗时和事件，并格式化 trace。当前 `Generate()` / `Run()` 尚未使用它，所以它是已实现但未接线的辅助模块。
+`RequestContext` 记录模型加载、tokenize、prefill、decode、sample 等阶段耗时和事件。CLI 的 `generate` 使用一份请求追踪加载与推理，`run` 分开追踪资源加载和每轮用户请求；库入口复用推理实现，但不展示追踪日志。
 
 ## 4. 第一个大模块的端到端执行流程
 
@@ -319,10 +320,10 @@ Sampler 不知道文本、上下文或 EOS 的含义。EOS 判断由上层生成
 2. 通过 `LoadModel(model.json, model.bin)` 加载模型权重。
 3. 检查 `model.loaded`；失败时读取 `model.load_error`，不能进入前向计算。
 4. 根据 `manifest.tokenizer.type/path` 创建对应 `ITokenizer`。
-5. 检查 tokenizer 词表与模型 `vocab_size` 是否兼容。
+5. 检查 tokenizer 词表与模型 `vocab_size` 是否兼容，并核对 JSON 清单声明的 BOS/EOS/UNK 与分词器实际 ID。
 6. 选择 `generate` 或 `run` 模式，并准备采样参数。
 
-当前这些步骤尚未由一个进程级入口自动串起，概念上的装配关系如下：
+当前 CLI 由 `RunMain()` 自动完成这些步骤；嵌入调用也可按下面的资源分层自行装配：
 
 ```cpp
 ModelManifest manifest = ParseManifest(config_path);
@@ -343,7 +344,7 @@ MiniLlamaModel model = LoadModel(config_path, weights_path);
 6. `ForwardBatch()` 顺序计算全部 prompt token，返回最后一个 prompt token 的 logits。
 7. `sampler.Sample(logits)` 选择下一个 token。
 8. 如果 token 是 EOS，立即结束。
-9. `DecodeToken()` 把 token 转成文本并追加到结果。
+9. 保存原始生成 ID；最后通过 `DecodeGeneratedTokens()` 整体解码并过滤结尾 EOS。
 10. 若还要继续生成，用 `MiniBatch::Single(token, ctx.pos + 1)` 把刚生成的 token 送回模型，得到下一轮 logits。
 11. 重复步骤 7～10，直到 EOS、达到 `max_tokens` 或到达上下文长度限制。
 
@@ -366,8 +367,7 @@ sequenceDiagram
     loop 直到 EOS / 数量上限 / 上下文上限
         U->>S: Sample(logits)
         S-->>U: next token
-        U->>T: DecodeToken(next token)
-        T-->>U: 文本片段
+        U->>U: 保存原始生成 ID
         U->>F: Single(next token, next position)
         F->>C: 追加新位置 K/V
         F-->>U: 新 logits
@@ -582,14 +582,14 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 - 当前提供 CPU F32 与 Q8_0/Q4_0/Q4_1 标量 Linear；量化路径尚未使用 SIMD，
   embedding 仍为 F32，也没有 GPU 后端。
 - `MiniBatch` 内部仍逐 token 执行，不是并行 batch 推理。
-- `src/main.cc` 没有进程级 `main()`，项目目前构建的是核心库和测试。
+- 项目同时构建核心库、CLI 与测试，`main()` 只在可执行目标中启用。
 - Loader 不会根据 `TokenizerInfo` 自动实例化 tokenizer。
-- Loader 与 `Run()` 之间没有最终 CLI 装配层。
+- `RunMain()` 的资源装配层已串接 Loader 与运行模式，并检查 JSON 清单与分词器的特殊 ID。
 - GGUF 模型权重可映射到 `MiniLlamaModel`，支持上述量化 Linear；自定义
   `model.json + model.bin` 路径继续使用 F32 权重。
-- `RequestContext` 已实现，但未接入 Generate/Run 的阶段计时。
-- Context 中的 `n_prefill_tokens` / `n_decode_tokens` 字段目前没有在主流程更新。
-- 聊天模板当前由 `PromptBuilder` 接收字符串，尚未自动从模型格式注入。
+- CLI 已接入生成与逐轮聊天的 `RequestContext` 阶段计时；库接口默认不展示 trace。
+- 主推理流程会更新 Context 的 `n_prefill_tokens` / `n_decode_tokens`；逐轮和会话统计分别由 RequestContext 与 ChatSession 管理。
+- GGUF 聊天模板已由装配层自动读取并注入 `PromptBuilder`。
 - 前缀复用只复用当前单个 Context 中仍存在的 KV Cache，没有跨请求 KV 快照池。
 
 这些边界不影响理解第一大模块的主干：它已经建立了从已加载模型和 tokenizer 到 autoregressive 文本生成的完整计算闭环。

@@ -40,10 +40,12 @@ void Terminal::Flush() const { output_->flush(); }
 void Terminal::NewLine() const { *output_ << '\n'; }
 
 void Terminal::PrintHelp() const {
+  // 所有聊天命令的帮助集中在终端模块，调用方无需追加单独的说明
   *output_ << "Commands:\n"
            << "  /help   Show this help\n"
            << "  /clear  Clear conversation history\n"
            << "  /stats  Show session statistics\n"
+           << "  /params Show current sampling parameters\n"
            << "  /exit   Exit chat\n";
 }
 
@@ -55,7 +57,9 @@ void Terminal::PrintStats(const ChatSession& session) const {
       session.total_time_ms > 0.0
           ? session.total_generated_tokens * 1000.0 / session.total_time_ms
           : 0.0;
-  *output_ << "Prompt tokens: " << session.total_prompt_tokens << '\n'
+  *output_ << "Messages: " << session.messages.size() << '\n'
+           << "Context tokens: " << session.token_history.size() << '\n'
+           << "Prompt tokens: " << session.total_prompt_tokens << '\n'
            << "Generated tokens: " << session.total_generated_tokens << '\n'
            << std::fixed << std::setprecision(2)
            << "Elapsed: " << session.total_time_ms << " ms\n"

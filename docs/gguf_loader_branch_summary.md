@@ -1,5 +1,8 @@
 # 分支汇总
 
+> 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
+> 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
+
 ## 分支定位
 
 本分支建立在现有 GGUF Reader、`MiniLlamaModel`、Tokenizer 和 CPU F32
