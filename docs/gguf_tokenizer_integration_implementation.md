@@ -138,7 +138,9 @@ EOS = 151645
 ```text
 --model 路径
     ↓
-若为目录：查找目录中唯一的 .gguf 文件
+ResolveModelPaths：目录优先 JSON+BIN，否则查找唯一 GGUF 候选
+    ↓
+以下为选定 GGUF 后的装配分支
     ↓
 LoadGgufModel() 加载模型
     ↓
@@ -155,8 +157,10 @@ LoadGgufModel() 加载模型
 `merges.txt` 时调用已有 `CreateBpeTokenizer()`；否则尝试既有 JSON 词表格式。
 该辅助选择逻辑属于 `main.cc` 内部实现，没有扩展 `tokenizer.h`。
 
-GGUF 同目录存在多个 `.gguf` 时会拒绝自动选择，避免结果依赖文件系统遍历
-顺序。旧版 `--config`、`--weights` 和 `--vocab` 路径继续保留。
+未选中完整 JSON+BIN 配对时，目录存在多个 GGUF 候选会拒绝自动选择，避免结果
+依赖遍历顺序；候选格式按文件魔数判断。旧版 `--config`、`--weights` 和 `--vocab`
+路径继续保留。JSON 模型会校验清单的 BOS/EOS/UNK 与实际分词器 ID，包括显式
+词表覆盖。完整入口规则见[同步说明](cli_integration_status.md)。
 
 生成参数同时接受项目原有选项和 llama.cpp 风格别名：
 

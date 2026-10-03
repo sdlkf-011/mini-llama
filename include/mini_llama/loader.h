@@ -18,7 +18,8 @@ struct TensorInfo {
   size_t byte_size = 0;    // 张量连续占用的字节数
 };
 
-// 分词器描述。path 由调用方相对于模型目录解析
+// 分词器描述。path 由装配层相对于清单目录解析
+// 特殊 token ID 是模型输入约定，装配层须与实际分词器核对一致后再启动推理
 struct TokenizerInfo {
   std::string type = "ascii";
   std::string path;

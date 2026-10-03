@@ -17,6 +17,8 @@ namespace mini_llama {
 int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
         const ITokenizer& tokenizer, std::istream& input, std::ostream& output,
         std::ostream& error);
+int RunMain(int argc, const char* const argv[], std::istream& input,
+            std::ostream& output, std::ostream& error);
 
 }  // namespace mini_llama
 
@@ -279,6 +281,8 @@ TEST(ChatTest, RunModeHandlesInteractiveCommands) {
 
   EXPECT_EQ(mini_llama::Run(4, argv, model, tokenizer, input, output, error), 0);
   EXPECT_TRUE(error.str().empty());
+  EXPECT_NE(output.str().find("Messages: 2"), std::string::npos);
+  EXPECT_NE(output.str().find("Context tokens: 2"), std::string::npos);
   EXPECT_NE(output.str().find("Generated tokens: 1"), std::string::npos);
   EXPECT_NE(output.str().find("Session cleared."), std::string::npos);
   EXPECT_NE(output.str().find("Generated tokens: 0"), std::string::npos);
@@ -321,6 +325,22 @@ TEST(ChatTest, RunModeRejectsPromptThatFillsContext) {
   EXPECT_NE(output.str().find("Prompt tokens: 0"), std::string::npos);
   EXPECT_NE(output.str().find("Generated tokens: 0"), std::string::npos);
   EXPECT_EQ(output.str().find("assistant >"), std::string::npos);
+}
+
+// 测试目的：run 的位置模型参数应在资源装配阶段被识别，而不是误传给生成参数
+// 解析器；即使路径不存在，trace 也必须以明确的 error 状态收尾。
+TEST(ChatTest, RunMainAcceptsPositionalModelPathAndTracesLoadFailure) {
+  std::istringstream input;
+  std::ostringstream output;
+  std::ostringstream error;
+  const char* argv[] = {"mini-llama", "run", "missing-model-directory", "-n", "1"};
+
+  EXPECT_EQ(mini_llama::RunMain(5, argv, input, output, error), 1);
+  EXPECT_TRUE(output.str().empty());
+  EXPECT_NE(error.str().find("model path does not exist: missing-model-directory"),
+            std::string::npos);
+  EXPECT_NE(error.str().find("mode=run status=error"), std::string::npos);
+  EXPECT_NE(error.str().find("model=missing-model-directory"), std::string::npos);
 }
 
 }  // namespace

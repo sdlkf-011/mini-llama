@@ -234,10 +234,11 @@ ITokenizer::Encode()
     ↓
 KV Cache 前缀复用 / prefill / decode
     ↓
-ITokenizer::DecodeToken()
+ITokenizer::Decode(完整生成 ID)，再输出新增文本后缀
 ```
 
-`run` 模式仍支持 `/help`、`/clear`、`/stats` 和 `/exit`。斜杠命令不会作为用户
+`run` 模式支持 `/help`、`/clear`、`/stats`、`/params` 和 `/exit`。帮助列表由
+`Terminal::PrintHelp()` 统一维护；`/params` 展示当前采样参数。斜杠命令不会作为用户
 消息送入模型；`/clear` 同时清理消息、token 历史、RadixTree、统计和 KV Cache
 上下文。
 
