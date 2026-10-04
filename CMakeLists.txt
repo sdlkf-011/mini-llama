@@ -34,6 +34,7 @@ add_library(mini_llama_core
   src/quantized_tensor.cc
   src/quant.cc
   src/model.cc
+  src/debug.cc
 )
 
 target_include_directories(mini_llama_core

@@ -1,0 +1,288 @@
+# 调试与基准测试阶段实现汇总
+
+> 本文记录 `feature/benchmark-design` 阶段完成时的实现状态。命令行的整体装配
+> 约定见[命令行与模块同步说明](cli_integration_status.md)。
+
+本阶段在现有模型加载、Tokenizer、`ForwardBatch()` 和 `MiniSampler` 之上增加了
+独立的调试与基准测试模块，并把它接入 `mini-llama bench` 命令。目标是用同一套
+CPU 推理链路分别测量预填充和逐 token 解码，同时提供定位张量、logits 与 KV
+Cache 状态的文本输出，不改变普通 `generate` 和交互式 `run` 的生成语义。
+
+## 阶段定位
+
+```text
+模型文件 + Tokenizer
+        ↓
+   CLI bench
+        ↓ 编码 prompt
+ RunBenchmark()
+   ├─ ForwardBatch(prompt) ──→ prefill_ms
+   ├─ 首 token 采样
+   └─ ForwardBatch(single) ──→ decode_ms
+        ↓
+ BenchmarkResult + RequestContext + 可选 verbose 输出
+```
+
+本阶段涉及的主要文件：
+
+- `include/mini_llama/debug.h`：公共调试接口和基准结果结构。
+- `src/debug.cc`：调试输出与基准执行实现。
+- `src/main.cc`：`bench` 参数解析、模型装配、结果展示和请求追踪。
+- `tests/debug_test.cc`：调试模块单元测试。
+- `tests/unit/main_test.cc`：`bench` 命令集成测试。
+- `CMakeLists.txt` 与 `tests/CMakeLists.txt`：生产代码和测试目标注册。
+
+## 公共接口参考
+
+### BenchmarkResult
+
+`BenchmarkResult` 保存一次基准运行的计数与耗时：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `n_prompt_tokens` | `int` | 本次预填充的 prompt token 数量 |
+| `n_generated_tokens` | `int` | 实际完成采样的生成 token 数量 |
+| `n_decode_tokens` | `int` | 实际执行单 token 前向的次数 |
+| `prefill_ms` | `double` | 批量预填充耗时，单位为毫秒 |
+| `decode_ms` | `double` | 逐 token 解码阶段累计耗时，单位为毫秒 |
+
+结构体提供两个吞吐量计算函数：
+
+```text
+tokens_per_sec
+  = n_generated_tokens × 1000 / (prefill_ms + decode_ms)
+
+decode_tokens_per_sec
+  = n_decode_tokens × 1000 / decode_ms
+```
+
+当分母不大于零时返回 `0.0`；解码次数为零时，解码吞吐量同样返回 `0.0`。
+
+### 调试输出函数
+
+| 接口 | 行为 |
+| --- | --- |
+| `DumpTensorShape(tensor, name)` | 输出名称、完整 shape、固定的 F32 类型和元素数量 |
+| `DumpLogitsTopK(logits, k)` | 对一维 logits 做降序部分排序并输出前 k 个 token ID 与数值 |
+| `DumpKvCacheInfo(cache, current_pos)` | 输出层数、最大序列长度、KV 头数、头维度及键值张量 shape |
+
+`DumpLogitsTopK()` 的输入不是一维张量时只输出错误提示。`k <= 0` 或 `k` 大于
+词表大小时会输出整个词表。详细浮点输出临时使用固定六位小数，函数返回前会恢复
+调用方输出流原来的格式状态。
+
+### RunBenchmark
+
+公共接口接受已经加载的模型、已经编码的 prompt token、生成预算、随机种子和
+详细输出开关：
+
+```cpp
+BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
+                             const std::vector<int>& prompt_tokens,
+                             int n_predict,
+                             unsigned int seed,
+                             bool verbose);
+```
+
+另一个重载额外接受 `std::ostream&`。CLI 使用该重载，将详细输出写入
+`RunMain()` 的可注入输出流；五参数接口保持直接写入 `std::cout` 的便捷行为。
+
+## 基准执行流程
+
+### 预填充
+
+每次运行创建独立的 `MiniLlamaContext`，因此 KV Cache、位置和 token 历史不会在
+不同基准之间复用。prompt 通过 `MiniBatch::FromTokens(prompt_tokens, 0)` 一次提交，
+`steady_clock` 只测量这次 `ForwardBatch()` 调用。
+
+预填充结束后，最后一个 prompt token 的 logits 直接用于首个生成 token 的采样。
+首 token 不需要额外前向，因此它会计入 `n_generated_tokens`，但不会计入
+`n_decode_tokens`。
+
+### 逐 token 解码
+
+从第二个生成 token 开始，运行器把上一次采样结果封装为 `MiniBatch::Single()`，
+执行一次前向并再次采样。因而在没有触及上下文上限时：
+
+```text
+n_generated_tokens = N
+n_decode_tokens    = max(N - 1, 0)
+```
+
+循环同时受 `n_predict` 和 `model.config.max_seq_len` 限制。prompt 已占满上下文时
+只执行预填充；`n_predict <= 0` 时不生成 token，`decode_ms` 保持为零。
+
+### 详细模式
+
+`verbose == true` 时输出：
+
+1. 预填充 token 数量。
+2. 预填充 logits 的 shape 和 Top-5；词表少于五项时自动缩小。
+3. 预填充后的 KV Cache 信息和当前位置。
+4. 每个生成 token ID，以及后续解码步骤的 logits Top-5。
+5. 运行结束时的 KV Cache 信息。
+
+详细输出用于定位状态，不用于获得稳定性能数字。预填充调试输出位于预填充计时
+之外，但解码循环中的 token 与 Top-k 输出位于 `decode_ms` 的计时区间内，启用
+`--verbose` 会降低测得的解码吞吐量。
+
+## CLI 接入
+
+### 命令与选项
+
+```bash
+./build/mini-llama bench <model-path|dir> [options]
+```
+
+| 选项 | 默认值 | 行为 |
+| --- | --- | --- |
+| `-m, --model <path|dir>` | 无 | 指定二进制、GGUF 或模型目录；也可使用位置参数 |
+| `--config <path>` | 自动推导 | 指定 JSON+BIN 模型清单 |
+| `--weights <path>` | 无 | `--model` 的旧版二进制权重别名 |
+| `--tokenizer <path>` | 自动选择 | 指定 tokenizer 目录或 `vocab.json` |
+| `--vocab <path>` | 无 | `--tokenizer` 的旧版别名 |
+| `-p, --prompt <text>` | `hello` | 指定需要编码和预填充的文本 |
+| `-n, --n-predict <n>` | `16` | 指定生成预算；`0` 表示只测预填充 |
+| `--max-tokens <n>` | `16` | `--n-predict` 的旧版别名 |
+| `--seed <n>` | `0` | 设置采样器种子 |
+| `--verbose` | 关闭 | 输出 logits 和 KV Cache 调试信息 |
+
+`bench` 复用 `generate` 的模型路径解析、模型加载、Tokenizer 选择和特殊 token
+校验，但不接受 `--temperature`、`--top-k` 或 `--dump-logits`。当前基准运行器使用
+默认温度 `0.0`，因此实际采用贪心采样；固定 seed 已保留在接口和追踪中，但不会
+改变当前贪心结果。
+
+### 运行性能基准
+
+```bash
+./build/mini-llama bench models/tiny \
+  --prompt hello \
+  --n-predict 16 \
+  --seed 42
+```
+
+输出结构如下，实际耗时取决于硬件、模型和系统负载：
+
+```text
+mini-llama benchmark
+====================
+prompt tokens: 6
+generated tokens: 16
+decode tokens: 15
+prefill: <毫秒> ms
+decode: <毫秒> ms
+throughput: <每秒 token 数> tokens/s
+decode throughput: <每秒 token 数> tokens/s
+```
+
+### 只测预填充
+
+```bash
+./build/mini-llama bench models/tiny -p hello -n 0
+```
+
+此时仍会执行完整 prompt 前向，但生成和解码计数均为零。当前
+`tokens_per_sec()` 按生成 token 定义，因此整体吞吐量也显示为零；`prefill_ms`
+仍可用于不同 prompt 长度或模型之间的直接比较。
+
+### 查看详细状态
+
+```bash
+./build/mini-llama bench models/tiny -p hello -n 2 --verbose
+```
+
+使用该模式检查 logits 排名、KV Cache shape 和位置推进。需要记录性能数字时应
+关闭 `--verbose`，并在相同机器、相同模型和相同 prompt 下比较。
+
+## CLI 数据流与请求追踪
+
+`RunBench()` 先使用现有 `EncodePrompt()` 编码输入，再调用带输出流参数的
+`RunBenchmark()`。结果随后写回 `RequestContext`：
+
+| 基准结果 | 请求追踪字段 |
+| --- | --- |
+| `n_prompt_tokens` | `prompt_tokens`、`prefill_tokens` |
+| `n_generated_tokens` | `generated_tokens` |
+| `n_decode_tokens` | `decode_tokens` |
+| `prefill_ms` | `prefill_ms` |
+| `decode_ms` | `decode_ms` |
+
+标准输出承载基准结果和可选调试信息；标准错误输出承载 `model_load`、`tokenize`、
+`prefill`、`decode` 事件及最终 summary。模型路径解析、加载或推理失败时沿用现有
+CLI 异常处理，输出 `status=error` 的请求摘要。
+
+## 设计取舍
+
+### 基准路径不替换普通生成路径
+
+`GenerateTokens()` 仍负责温度/Top-k、EOS、文本解码、逐步 logits 文件导出和
+生成请求语义。`RunBenchmark()` 只负责隔离上下文、执行固定推理工作量和统计
+耗时。两条路径共享底层 `ForwardBatch()` 和 `MiniSampler`，但不为了减少代码行数
+而混合不同目的。
+
+### 首 token 与 decode 分开计数
+
+首 token 直接来自预填充 logits，没有单 token 前向成本。把它算进生成数、但不
+算进解码数，可以让 `decode_tokens_per_sec()` 的分子与真正执行的解码前向次数
+一致。整体吞吐量则继续反映从预填充到获得全部生成 token 的总推理成本。
+
+### 输出流可注入
+
+原始便捷接口继续支持 `std::cout`，CLI 使用显式 `std::ostream&`。这样
+`RunMain()` 的调用方和单元测试能完整捕获 `--verbose` 输出，调试模块也不需要依赖
+命令行全局状态。
+
+## 测试覆盖
+
+`tests/debug_test.cc` 包含 8 项单元测试：
+
+- 两种吞吐量公式及零耗时保护。
+- 张量 shape 元数据输出。
+- logits Top-k 的数量、降序和 token ID。
+- 非一维 logits 的拒绝提示。
+- KV Cache 配置、shape 和当前位置输出。
+- 预填充、首 token 和逐 token 解码计数。
+- 最大上下文长度截断。
+- verbose 模式的完整调试信息。
+
+`tests/unit/main_test.cc` 另有 1 项 CLI 集成测试，覆盖 `bench --help`、资源装配、
+`--verbose` 输出流、统计结果和 `mode=bench` 请求追踪。
+
+本阶段验证命令：
+
+```bash
+cmake -S . -B build
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+当前完整构建成功，CTest **104/104** 通过，`git diff --check` 通过。手工执行
+`bench models/tiny -p hello -n 2 --seed 42` 可得到 2 个生成 token、1 次 decode
+及对应的 prefill/decode 吞吐量。
+
+## 当前边界
+
+- 库级 `RunBenchmark()` 接受已经编码且非空的 prompt；空 prompt 会被
+  `ForwardBatch()` 拒绝。CLI 会通过 `EncodePrompt()` 为合法空文本补入 BOS。
+- 基准路径不识别 EOS，也不解码生成文本；它按预算或上下文上限完成固定工作量。
+- 当前只使用贪心采样，`seed` 不影响结果；随机采样性能不属于本阶段范围。
+- 当前没有 warm-up、重复轮次、均值、分位数或方差统计，单次结果容易受系统负载
+  和首次运行开销影响。
+- `prefill_ms` 与 `decode_ms` 不包含模型加载和 prompt 编码；这些阶段单独记录在
+  `RequestContext` 中。
+- `decode_ms` 覆盖逐 token 前向、采样以及 verbose 模式下的循环内输出，因此
+  性能比较必须关闭 `--verbose`。
+- 当前 CPU 路径没有线程数或后端选择选项，基准结果不能直接代表其他后端。
+- `DumpKvCacheInfo()` 面向正常构造的四维 `KvCache`，不负责诊断损坏或未初始化的
+  cache shape。
+
+## 相关文档
+
+- [命令行与模块同步说明](cli_integration_status.md)
+- [KV Cache、Context 与 Forward 实现说明](kv_cache_context_implementation.md)
+- [Sampler、采样策略与生成入口阶段实现汇总](sampler_sampling_strategy_implementation.md)
+
+## 一句话总结
+
+本阶段把可复用的张量、logits、KV Cache 调试输出和 prefill/decode 计时封装为
+独立模块，并通过 `mini-llama bench` 接入真实模型加载、请求追踪和完整回归测试，
+形成了可运行、可诊断、计时口径明确的 CPU 推理基准入口。

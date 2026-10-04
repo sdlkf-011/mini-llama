@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -16,6 +17,7 @@
 #include "mini_llama/batch.h"
 #include "mini_llama/chat.h"
 #include "mini_llama/context.h"
+#include "mini_llama/debug.h"
 #include "mini_llama/forward.h"
 #include "mini_llama/gguf.h"
 #include "mini_llama/gguf_loader.h"
@@ -79,6 +81,7 @@ struct CommandOptions {
   int n_predict = 16;  // generate 的总生成预算，或 run 的单轮响应上限
   SamplingParams sampling;
   std::string dump_logits_dir;
+  bool verbose = false;
 };
 
 // 使用 from_chars 拒绝负号、空白、尾随字符和溢出；不限制合法 seed 的范围
@@ -121,12 +124,18 @@ bool IsGenerationCommand(const std::string& command) {
   return command == "generate" || command == "run";
 }
 
+// 需要模型、分词器和 prompt 的命令共用资源及基础推理参数
+bool IsInferenceCommand(const std::string& command) {
+  return IsGenerationCommand(command) || command == "bench";
+}
+
 // 全局帮助只列出当前已接入的命令，具体参数交给对应命令帮助说明
 void PrintGlobalUsage(const char* prog, std::ostream& out) {
   out << "Usage: " << prog << " <command> [options]\n"
       << "Commands:\n"
       << "  generate      One-shot text generation\n"
       << "  run           Interactive chat mode\n"
+      << "  bench         Benchmark prefill and token decoding\n"
       << "  inspect       Inspect model configuration and tensors\n"
       << "  inspect-gguf  Inspect GGUF metadata and tensor directory\n"
       << "\nRun \"" << prog << " <command> --help\" for details.\n";
@@ -150,7 +159,7 @@ void PrintCommandUsage(const char* prog, const std::string& command,
       << "  -m, --model <path|dir> Model binary, GGUF file, or model directory\n"
       << "  --config <path>       JSON manifest for a binary model\n";
 
-  if (IsGenerationCommand(command)) {
+  if (IsInferenceCommand(command)) {
     out << "  --weights <path>      Alias for --model with binary weights\n"
         << "  --tokenizer <path>    Tokenizer directory or vocab.json override\n"
         << "  --vocab <path>        Legacy alias for --tokenizer\n"
@@ -163,9 +172,14 @@ void PrintCommandUsage(const char* prog, const std::string& command,
                              : "Tokens to generate (default: 16; 0 = prefill only)")
         << "\n"
         << "  --max-tokens <n>      Legacy alias for --n-predict\n"
-        << "  --temperature <T>     Sampling temperature (default: 0 = greedy)\n"
-        << "  --top-k <k>           Top-k sampling (default: 0 = disabled)\n"
         << "  --seed <S>            Random seed (default: 0 = random)\n";
+
+    if (IsGenerationCommand(command)) {
+      out << "  --temperature <T>     Sampling temperature (default: 0 = greedy)\n"
+          << "  --top-k <k>           Top-k sampling (default: 0 = disabled)\n";
+    } else {
+      out << "  --verbose             Print logits and KV cache details\n";
+    }
 
     if (command == "generate") {
       out << "  --dump-logits <dir>   Dump step logits and generation_tokens.txt\n"
@@ -185,14 +199,15 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
     options.command = argv[1];
     ++start;
   }
-  if (!IsGenerationCommand(options.command) && options.command != "inspect" &&
+  if (!IsInferenceCommand(options.command) && options.command != "inspect" &&
       options.command != "inspect-gguf") {
     throw std::invalid_argument("unknown command: " + options.command);
   }
 
-  // 两种生成模式使用各自默认值；run 的 prompt 仅作为可选首轮输入
+  // 各推理模式使用对应默认值；run 的 prompt 仅作为可选首轮输入
   options.n_predict = options.command == "run" ? 64 : 16;
-  options.prompt = options.command == "generate" ? "hello" : "";
+  options.prompt =
+      options.command == "generate" || options.command == "bench" ? "hello" : "";
 
   // 消费下一个 argv 并推进索引；文本值允许以 '-' 开头
   const auto read_value = [&](int& index, const std::string& option) {
@@ -229,19 +244,19 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
     } else if (allow_resource_options && options.command != "inspect-gguf" &&
                option == "--config") {
       set_path(options.config_path, i, option);
-    } else if (allow_resource_options && IsGenerationCommand(options.command) &&
+    } else if (allow_resource_options && IsInferenceCommand(options.command) &&
                option == "--weights") {
       set_path(options.weights_path, i, option);
-    } else if (allow_resource_options && IsGenerationCommand(options.command) &&
+    } else if (allow_resource_options && IsInferenceCommand(options.command) &&
                option == "--tokenizer") {
       set_path(options.tokenizer_path, i, option);
-    } else if (allow_resource_options && IsGenerationCommand(options.command) &&
+    } else if (allow_resource_options && IsInferenceCommand(options.command) &&
                option == "--vocab") {
       set_path(options.vocab_path, i, option);
-    } else if (IsGenerationCommand(options.command) &&
+    } else if (IsInferenceCommand(options.command) &&
                (option == "-p" || option == "--prompt")) {
       options.prompt = read_value(i, option);
-    } else if (IsGenerationCommand(options.command) &&
+    } else if (IsInferenceCommand(options.command) &&
                (option == "-n" || option == "--n-predict" ||
                 option == "--max-tokens")) {
       options.n_predict = ParseIntArg(read_value(i, option), option);
@@ -249,9 +264,11 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
       options.sampling.temperature = ParseFloatArg(read_value(i, option), option);
     } else if (IsGenerationCommand(options.command) && option == "--top-k") {
       options.sampling.top_k = ParseIntArg(read_value(i, option), option);
-    } else if (IsGenerationCommand(options.command) && option == "--seed") {
+    } else if (IsInferenceCommand(options.command) && option == "--seed") {
       options.sampling.seed =
           ParseInteger<unsigned int>(read_value(i, option), option);
+    } else if (options.command == "bench" && option == "--verbose") {
+      options.verbose = true;
     } else if (options.command == "generate" && option == "--dump-logits") {
       set_path(options.dump_logits_dir, i, option);
     } else {
@@ -705,6 +722,50 @@ int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
   return 0;
 }
 
+// 执行独立基准测试，并把基准结果同步到请求追踪和命令行输出
+int RunBench(const LoadedModel& loaded, const CommandOptions& options,
+             RequestContext& request, std::ostream& output) {
+  const auto tokenize_start = RequestClock::now();
+  const std::vector<int> prompt = EncodePrompt(
+      loaded.model, *loaded.tokenizer, options.prompt, options.n_predict > 0);
+  request.tokenize_ms = ElapsedMs(tokenize_start);
+  request.prompt_tokens = static_cast<int>(prompt.size());
+  request.RecordEvent("tokenize", request.tokenize_ms, request.prompt_tokens,
+                      "benchmark_prompt");
+
+  const BenchmarkResult result =
+      RunBenchmark(loaded.model, prompt, options.n_predict, options.sampling.seed,
+                   options.verbose, output);
+  request.prefill_tokens = result.n_prompt_tokens;
+  request.generated_tokens = result.n_generated_tokens;
+  request.decode_tokens = result.n_decode_tokens;
+  request.prefill_ms = result.prefill_ms;
+  request.decode_ms = result.decode_ms;
+  request.RecordEvent("prefill", result.prefill_ms, result.n_prompt_tokens,
+                      "benchmark");
+  if (result.n_decode_tokens > 0) {
+    request.RecordEvent("decode", result.decode_ms, result.n_decode_tokens,
+                        "benchmark");
+  }
+
+  // 临时设置统计数值格式，输出后恢复调用方流的原有状态
+  const std::ios::fmtflags old_flags = output.flags();
+  const std::streamsize old_precision = output.precision();
+  output << "mini-llama benchmark\n"
+         << "====================\n"
+         << "prompt tokens: " << result.n_prompt_tokens << '\n'
+         << "generated tokens: " << result.n_generated_tokens << '\n'
+         << "decode tokens: " << result.n_decode_tokens << '\n'
+         << std::fixed << std::setprecision(3) << "prefill: " << result.prefill_ms
+         << " ms\n"
+         << "decode: " << result.decode_ms << " ms\n"
+         << "throughput: " << result.tokens_per_sec() << " tokens/s\n"
+         << "decode throughput: " << result.decode_tokens_per_sec() << " tokens/s\n";
+  output.flags(old_flags);
+  output.precision(old_precision);
+  return 0;
+}
+
 // ----------------------------------------------
 // run：多轮会话、前缀复用和终端命令
 // ----------------------------------------------
@@ -1114,8 +1175,10 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
                      input, output, paths.model.string(), true);
     }
 
-    // generate 的加载和推理属于同一次请求，成功后统一结束并输出追踪
-    const int status = RunGenerate(loaded, options, request, output);
+    // 单轮生成与基准测试都在完成推理后统一结束并输出请求追踪
+    const int status = options.command == "bench"
+                           ? RunBench(loaded, options, request, output)
+                           : RunGenerate(loaded, options, request, output);
     request.Finish();
     PrintRequestTrace(request, error);
     return status;
