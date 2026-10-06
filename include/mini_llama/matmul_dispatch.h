@@ -6,10 +6,13 @@
 namespace mini_llama {
 
 enum class MatmulMode {
-  kNaive,  // 朴素三层循环，正确性基线
+  kNaive,         // 朴素三层循环，正确性基线
+  kThreaded,      // 多线程，Linear 按输出通道并行
+  kSimd,          // SIMD 点积，仅用于 Linear
+  kThreadedSimd,  // 多线程输出通道 + SIMD 点积
 };
 
-// 主推理路径使用的默认模式
+// 主推理路径默认使用 kThreadedSimd；通用 Matmul 回退到多线程实现
 MatmulMode DefaultMatmulMode();
 
 // F32 矩阵乘法：[m,k] × [k,n] -> [m,n]

@@ -31,8 +31,7 @@ void AppendMetadataString(std::vector<uint8_t>* bytes, const std::string& key,
 class TemporaryGguf {
  public:
   TemporaryGguf() {
-    path_ =
-        std::filesystem::temp_directory_path() / "mini_llama_gguf_test.gguf";
+    path_ = std::filesystem::temp_directory_path() / "mini_llama_gguf_test.gguf";
     std::error_code ignored;
     std::filesystem::remove(path_, ignored);
   }
@@ -115,10 +114,10 @@ TEST(GgufTest, ReadsTypedMetadataAndRawTensor) {
   std::string text;
   std::vector<std::string> strings;
   std::vector<int32_t> integers;
-  ASSERT_TRUE(mini_llama::GgufGetMetadataInt(fixture.path().string(),
-                                             "test.int", integer));
-  ASSERT_TRUE(mini_llama::GgufGetMetadataFloat(fixture.path().string(),
-                                               "test.float", floating));
+  ASSERT_TRUE(
+      mini_llama::GgufGetMetadataInt(fixture.path().string(), "test.int", integer));
+  ASSERT_TRUE(mini_llama::GgufGetMetadataFloat(fixture.path().string(), "test.float",
+                                               floating));
   ASSERT_TRUE(mini_llama::GgufGetMetadataString(fixture.path().string(),
                                                 "general.name", text));
   ASSERT_TRUE(mini_llama::GgufGetMetadataStringArray(fixture.path().string(),
@@ -130,16 +129,16 @@ TEST(GgufTest, ReadsTypedMetadataAndRawTensor) {
   EXPECT_EQ(text, "unit");
   EXPECT_EQ(strings, std::vector<std::string>({"one", "two"}));
   EXPECT_EQ(integers, std::vector<int32_t>({1, -2, 3}));
-  EXPECT_FALSE(mini_llama::GgufGetMetadataInt(fixture.path().string(),
-                                              "missing", integer));
+  EXPECT_FALSE(
+      mini_llama::GgufGetMetadataInt(fixture.path().string(), "missing", integer));
 
   mini_llama::GgufReader reader;
   ASSERT_TRUE(reader.Load(fixture.path().string()));
   uint64_t size = 0;
   ASSERT_TRUE(mini_llama::GgufTensorDataSize(reader.tensors[0], size));
   EXPECT_EQ(size, 8u);
-  EXPECT_EQ(mini_llama::ReadGgufTensorRaw(
-                fixture.path().string(), reader.tensors[0], reader.data_offset),
+  EXPECT_EQ(mini_llama::ReadGgufTensorRaw(fixture.path().string(), reader.tensors[0],
+                                          reader.data_offset),
             std::vector<uint8_t>({0, 0, 128, 63, 0, 0, 0, 64}));
 }
 
@@ -164,8 +163,7 @@ TEST(GgufTest, RejectsMalformedInputAndInvalidSizes) {
 // 测试目的：验证仓库内的基础 GGUF fixture 可加载，并能读取其真实 F32 数据范围。
 TEST(GgufTest, LoadsRepositoryFixture) {
   mini_llama::GgufReader reader;
-  ASSERT_TRUE(
-      reader.Load(std::string(MINI_LLAMA_TEST_MODEL_DIR) + "/test.gguf"))
+  ASSERT_TRUE(reader.Load(std::string(MINI_LLAMA_TEST_MODEL_DIR) + "/test.gguf"))
       << reader.load_error;
   ASSERT_EQ(reader.tensors.size(), 1u);
   EXPECT_EQ(reader.tensors[0].name, "test.weight");

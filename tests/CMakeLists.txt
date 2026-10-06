@@ -37,6 +37,8 @@ function(add_unit_test test_name test_source)
 endfunction()
 
 add_unit_test(mini-llama-tensor-tests unit/tensor_test.cc)
+add_unit_test(mini-llama-threaded-matmul-tests threaded_matmul_test.cc
+              "mini-llama-tests.")
 add_unit_test(mini-llama-tokenizer-tests unit/tokenizer_test.cc)
 add_unit_test(mini-llama-gguf-tokenizer-tests unit/gguf_tokenizer_test.cc)
 add_unit_test(mini-llama-gguf-tokenizer-integration-tests gguf_tokenizer_test.cc

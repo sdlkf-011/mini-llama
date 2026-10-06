@@ -2,6 +2,7 @@
 #define MINI_LLAMA_INCLUDE_MINI_LLAMA_OPS_H_
 
 #include "mini_llama/model.h"
+#include "mini_llama/quantized_tensor.h"
 #include "mini_llama/tensor.h"
 
 namespace mini_llama {
@@ -15,6 +16,9 @@ Tensor Matmul(const Tensor& a, const Tensor& b);
 // weight: [out_features, in_features]
 // 结果保持 x 的秩：[out_features] 或 [1, out_features]
 Tensor Linear(const Tensor& x, const Tensor& weight);
+
+// 按权重格式分发到 F32 或量化块 Linear，不展开完整的量化权重
+Tensor Linear(const Tensor& x, const QuantizedTensor& weight);
 
 // RMSNorm：y = x / sqrt(mean(x^2) + eps) * weight
 // x: [dim]，weight: [dim]，result: [dim]

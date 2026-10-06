@@ -7,6 +7,7 @@
 
 #include "mini_llama/ops.h"
 #include "mini_llama/quant.h"
+#include "mini_llama/thread_pool.h"
 
 namespace mini_llama {
 namespace {
@@ -250,31 +251,34 @@ Tensor AttentionForward(const MiniLlamaModel& model, const Tensor& query,
   Tensor output({n_heads, head_dim}, 0.0f);
   const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-  for (int query_head = 0; query_head < n_heads; ++query_head) {
-    const int kv_head = MapQHeadToKvHead(query_head, n_heads, n_kv_heads);
-    Tensor scores({pos + 1}, 0.0f);
+  // 缓存写入已完成；各 head 只读缓存，并独占输出中对应的一行
+  ParallelFor(n_heads, [&](int begin, int end) {
+    for (int query_head = begin; query_head < end; ++query_head) {
+      const int kv_head = MapQHeadToKvHead(query_head, n_heads, n_kv_heads);
+      Tensor scores({pos + 1}, 0.0f);
 
-    // 只遍历不晚于当前位置的缓存，因此自然满足自回归因果掩码
-    for (int token_pos = 0; token_pos <= pos; ++token_pos) {
-      const float* cached_key = kv_cache.KeyPtr(layer, token_pos, kv_head);
-      float dot = 0.0f;
-      for (int index = 0; index < head_dim; ++index) {
-        dot += query.data[query_head * head_dim + index] * cached_key[index];
-      }
-      scores.data[token_pos] = dot * scale;
-    }
-
-    // Softmax 得到历史位置权重，再对相同 KV 头中的 V 做加权求和
-    const Tensor probabilities = ForwardSoftmax(model, scores);
-    for (int index = 0; index < head_dim; ++index) {
-      float weighted_value = 0.0f;
+      // 只遍历不晚于当前位置的缓存，因此自然满足自回归因果掩码
       for (int token_pos = 0; token_pos <= pos; ++token_pos) {
-        const float* cached_value = kv_cache.valuePtr(layer, token_pos, kv_head);
-        weighted_value += probabilities.data[token_pos] * cached_value[index];
+        const float* cached_key = kv_cache.KeyPtr(layer, token_pos, kv_head);
+        float dot = 0.0f;
+        for (int index = 0; index < head_dim; ++index) {
+          dot += query.data[query_head * head_dim + index] * cached_key[index];
+        }
+        scores.data[token_pos] = dot * scale;
       }
-      output.data[query_head * head_dim + index] = weighted_value;
+
+      // Softmax 得到历史位置权重，再对相同 KV 头中的 V 做加权求和
+      const Tensor probabilities = ForwardSoftmax(model, scores);
+      for (int index = 0; index < head_dim; ++index) {
+        float weighted_value = 0.0f;
+        for (int token_pos = 0; token_pos <= pos; ++token_pos) {
+          const float* cached_value = kv_cache.valuePtr(layer, token_pos, kv_head);
+          weighted_value += probabilities.data[token_pos] * cached_value[index];
+        }
+        output.data[query_head * head_dim + index] = weighted_value;
+      }
     }
-  }
+  });
   return output;
 }
 

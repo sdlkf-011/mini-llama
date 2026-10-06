@@ -1358,6 +1358,9 @@ stats：交互会话累计消息、上下文和吞吐
 ### 性能与内存
 
 - 量化 Linear 是标量实现，没有 SIMD、线程池或 GPU。
+- F32 Linear 已支持 SIMD 和输出通道级多线程，Matmul 与 CPU Attention 复用
+  `ParallelFor()`；CLI 支持 `--threads`。这些优化不改变上述量化路径的状态，
+  详见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 - `MiniBatch` 仍逐 token 调用 `ForwardToken()`。
 - token embedding 会展开为 F32。
 - tied LM Head 当前复制 embedding，而不是共享存储。

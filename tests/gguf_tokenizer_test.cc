@@ -239,8 +239,7 @@ TEST(GgufTokenizerIntegrationTest, gguf_tokenizer_matches_bpe_tokenizer) {
   EXPECT_TRUE(std::filesystem::is_regular_file(directory.File("merges.txt")));
   EXPECT_TRUE(
       std::filesystem::is_regular_file(directory.File("special_tokens.json")));
-  EXPECT_TRUE(
-      std::filesystem::is_regular_file(directory.File("chat_template.txt")));
+  EXPECT_TRUE(std::filesystem::is_regular_file(directory.File("chat_template.txt")));
 
   gguf_tokenizer = CreateGgufTokenizer(real_gguf.string());
   bpe_tokenizer = CreateBpeTokenizer(directory.File("vocab.json").string(),
