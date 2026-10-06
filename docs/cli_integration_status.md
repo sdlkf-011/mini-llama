@@ -2,6 +2,8 @@
 
 本文描述当前 `src/main.cc` 与已实现模块的接入约定。分支阶段文档中的实现范围、
 真实模型输出和测试快照保留历史含义；当前入口行为以本文和源码为准。
+调试接口、计时口径和 `bench` 的详细设计见
+[调试与基准测试阶段实现汇总](benchmark_debug_implementation.md)。
 
 ## 构建与入口
 
@@ -14,10 +16,11 @@
 | --- | --- |
 | `generate` | 单轮生成，默认教学模型、`hello`、16 个生成 token |
 | `run` | 多轮聊天，需要模型路径，默认每轮最多生成 64 个 token |
+| `bench` | 测量预填充与逐 token 解码性能，可用 `--verbose` 输出调试信息 |
 | `inspect` | 检查 JSON 清单或 GGUF 元数据，不加载模型权重或分词器 |
 | `inspect-gguf` | 直接检查 GGUF 文件头、元数据和张量目录 |
 
-CUDA、线程配置、benchmark 和整模型重新量化尚未接入 CLI。已有量化 Linear 可
+CUDA、线程配置和整模型重新量化尚未接入 CLI。已有量化 Linear 可
 运行 GGUF 中的 Q8_0/Q4_0/Q4_1 权重；单张量量化与模型权重字节统计仍是库能力。
 
 ## 参数与模型选择
@@ -36,9 +39,10 @@ CUDA、线程配置、benchmark 和整模型重新量化尚未接入 CLI。已�
 4. `inspect` 可只读取 JSON 清单，无需权重和词表文件。
 5. GGUF 不与 `--config`、`--weights` 混用；`--tokenizer` 与旧版 `--vocab` 二选一。
 
-生成长度选项包括 `--n-predict/-n` 和旧版 `--max-tokens`。CLI `generate` 拒绝
+推理长度选项包括 `--n-predict/-n` 和旧版 `--max-tokens`。CLI `generate` 拒绝
 超过上下文的完整生成预算，`-n 0` 只执行 prefill；`run` 要求正数响应预算并根据
-当前剩余窗口截断。既有库调用保留按窗口剩余容量截断的行为。
+当前剩余窗口截断。`bench` 接受 `-n 0` 测量纯预填充，并在达到上下文上限时停止。
+既有库调用保留按窗口剩余容量截断的行为。
 
 ## 分词器与特殊 token 校验
 
@@ -71,6 +75,11 @@ decode，并更新上下文与请求指标。首个 token 也检查 EOS；最后
 无需计算下一份 logits。原始 ID 和导出文件保留 EOS，展示文本过滤结尾 EOS。
 `--dump-logits` 导出逐位置 F32 logits 和 `generation_tokens.txt`。
 
+`RunBench()` 调用独立的 `RunBenchmark()`，分别统计批量 prefill 和逐 token
+decode。首个生成 token 直接从 prefill logits 采样，因此生成 N 个 token 通常
+只有 N-1 次 decode。`--verbose` 输出 logits Top-k 和 KV Cache 状态，诊断时可用，
+正式测量吞吐量时应关闭。
+
 `RunChat()` 驱动交互，`RunChatTurn()` 根据 RadixTree 命中与当前物理上下文的
 公共前缀确定复用范围，只对缺失后缀 prefill。正常生成结束后提交消息与缓存
 前缀；推理失败时重建上下文并清除当前 token 跟踪，避免复用半轮数据。
@@ -84,6 +93,7 @@ decode，并更新上下文与请求指标。首个 token 也检查 EOS；最后
 | 路径 | 请求生命周期 | 追踪输出 |
 | --- | --- | --- |
 | CLI `generate` | 一份 RequestContext 覆盖资源加载和生成 | stderr |
+| CLI `bench` | 一份 RequestContext 覆盖资源加载、编码和基准运行 | stderr |
 | CLI `run` 加载 | 资源加载完成时结束 | stderr |
 | CLI `run` 每轮 | 读取输入后启动，成功或失败时结束 | 终端输出流 |
 | 库 `Generate/Run` | 复用相同推理编排 | 默认不展示追踪日志 |
@@ -106,7 +116,6 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure -j2
 ```
 
-新增回归覆盖三个特殊 ID 的逐项冲突、自动与显式词表来源、ASCII 清单冲突、
-非默认特殊 ID 的一致配置，以及 Terminal 与聊天入口的完整帮助一致性。
-本次同步修复后，构建成功，全量 CTest **95/95 通过**。
-历史文档中的 82 项测试是当时的快照，不代表当前测试数量。
+当前回归在既有模型加载、Tokenizer、生成、聊天和检查命令之外，新增 8 项调试
+模块单元测试与 1 项 `bench` CLI 集成测试。本次同步后构建成功，全量 CTest
+**104/104 通过**。历史文档中的 82、95 项测试是对应阶段快照，不代表当前数量。

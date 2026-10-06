@@ -82,18 +82,40 @@ std::string GeneratedLine(const std::string& output) {
   return output.substr(begin, output.find('\n', begin) - begin);
 }
 
-// 帮助不访问模型；未实现命令必须报错，不能悄悄落入 generate。
+// 测试目的：帮助不访问模型；未实现命令必须报错，不能悄悄落入 generate。
 TEST_F(MainTest, HelpAndUnknownCommandsDoNotLoadModels) {
   const auto help = Invoke({"mini-llama", "run", "missing-model", "--help"});
   EXPECT_EQ(help.status, 0);
   EXPECT_NE(help.output.find("--n-predict"), std::string::npos);
   EXPECT_TRUE(help.error.empty());
-  for (const auto* command : {"bench", "unknown"}) {
-    const auto result = Invoke({"mini-llama", command});
-    EXPECT_EQ(result.status, 1);
-    EXPECT_NE(result.error.find("unknown command"), std::string::npos);
-    EXPECT_EQ(result.error.find("trace summary"), std::string::npos);
-  }
+  const auto bench_help = Invoke({"mini-llama", "bench", "missing-model", "--help"});
+  EXPECT_EQ(bench_help.status, 0);
+  EXPECT_NE(bench_help.output.find("--verbose"), std::string::npos);
+  EXPECT_TRUE(bench_help.error.empty());
+
+  const auto unknown = Invoke({"mini-llama", "unknown"});
+  EXPECT_EQ(unknown.status, 1);
+  EXPECT_NE(unknown.error.find("unknown command"), std::string::npos);
+  EXPECT_EQ(unknown.error.find("trace summary"), std::string::npos);
+}
+
+// 测试目的：bench 命令应复用模型与分词器装配，输出预填充和解码统计；
+// verbose 调试信息必须写入调用方注入的输出流，并同步到请求追踪。
+TEST_F(MainTest, BenchmarkCommandPrintsStatisticsAndVerboseDetails) {
+  const auto result = Invoke({"mini-llama", "bench", kModelDir, "-p", "hello", "-n",
+                              "2", "--seed", "42", "--verbose"});
+
+  ASSERT_EQ(result.status, 0) << result.error;
+  EXPECT_NE(result.output.find("[verbose] prefill"), std::string::npos);
+  EXPECT_NE(result.output.find("tensor: logits"), std::string::npos);
+  EXPECT_NE(result.output.find("KV cache: layers="), std::string::npos);
+  EXPECT_NE(result.output.find("mini-llama benchmark"), std::string::npos);
+  EXPECT_NE(result.output.find("generated tokens: 2"), std::string::npos);
+  EXPECT_NE(result.output.find("decode tokens: 1"), std::string::npos);
+  EXPECT_NE(result.output.find("decode throughput:"), std::string::npos);
+  EXPECT_NE(result.error.find("mode=bench status=ok"), std::string::npos);
+  EXPECT_NE(result.error.find("decode_tokens=1 generated_tokens=2"),
+            std::string::npos);
 }
 
 // 选项值中的标志字样是文本，不能被帮助扫描或资源路径扫描吞掉。
