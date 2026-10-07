@@ -6,7 +6,7 @@
 - `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`。支持 `kNaive`、`kThreaded`、`kSimd`、`kThreadedSimd`；默认模式为 `kThreadedSimd`，通用 Matmul 的 SIMD 模式回退到按输出行并行的标量实现。
 - `LinearDispatch` 支持 `[in_features]` 与 `[1, in_features]` 输入，按 `x @ weight^T` 计算并保持输入秩。
 - F32 Linear 默认按输出通道调用 `ParallelFor()`，每行使用 AVX2/FMA、NEON 或 scalar 点积；权重仍按 `[out_features, in_features]` 连续存储。
-- `Linear(x, QuantizedTensor)` 独立按 F32/Q8_0/Q4_0/Q4_1 格式分发；量化路径继续即时反量化点积，其并行优化属于后续模块。
+- `Linear(x, QuantizedTensor)` 独立按 F32/Q8_0/Q4_0/Q4_1 格式分发。本阶段完善的 `LinearQ80/Q40/Q41` 均支持 batch，并按输入行与输出通道并行；Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，Q4_1 使用 scalar 点积。
 - `RmsNorm`、`Softmax`、`Silu`、`ElementwiseMul`、`SwiGlu` 和 `ArgMax` 提供推理所需的基础逐元素及归约算子。
 
 ## 正确性审查
@@ -28,9 +28,12 @@
 - 2×3 与 3×2 矩阵乘法，验证当前朴素 dispatch 模式和错误维度处理。
 - 一维与二维 Linear、RMSNorm、稳定 Softmax、Silu、逐元素乘法、SwiGLU 和 ArgMax。
 
-`tests/threaded_matmul_test.cc` 补充 9 项测试，覆盖多种执行模式和线程数、SIMD
-尾部、小任务、非整除切分、回调异常，以及带 bias/GQA 的并行 Attention。
+`tests/threaded_matmul_test.cc` 现有 14 项测试，覆盖多种执行模式和线程数、SIMD
+尾部、小任务、非整除切分、回调异常，以及带 bias/GQA 的并行 Attention；量化
+测试覆盖 batch、块尾部、非法输入、兼容接口、误差比较和 Q4_0 舍入边界。
 实现与测试矩阵见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
+新增量化功能与验证边界见
+[SIMD 点积、量化 Linear 与 batch 支持阶段总结](simd_quantized_linear_implementation.md)。
 
 ## 验证方式
 
