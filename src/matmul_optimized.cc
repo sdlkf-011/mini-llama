@@ -102,11 +102,10 @@ static Tensor LinearThreaded(const Tensor& x, const Tensor& weight) {
 }
 
 // 连续 F32 向量点积，SIMD 主循环之后用标量处理尾部
-static float DotSimd(const float* a, const float* b, int n) {
-  float sum = 0.0f;
-  int i = 0;
 #if defined(MINI_LLAMA_USE_AVX2)
+static float DotSimdAvx2(const float* a, const float* b, int n) {
   __m256 accumulator = _mm256_setzero_ps();
+  int i = 0;
   for (; i <= n - 8; i += 8) {
     accumulator =
         _mm256_fmadd_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), accumulator);
@@ -115,21 +114,48 @@ static float DotSimd(const float* a, const float* b, int n) {
                              _mm256_extractf128_ps(accumulator, 1));
   halves = _mm_hadd_ps(halves, halves);
   halves = _mm_hadd_ps(halves, halves);
-  sum = _mm_cvtss_f32(halves);
-#elif defined(MINI_LLAMA_USE_NEON)
-  float32x4_t accumulator = vdupq_n_f32(0.0f);
-  for (; i <= n - 4; i += 4) {
-    accumulator = vmlaq_f32(accumulator, vld1q_f32(a + i), vld1q_f32(b + i));
-  }
-  float32x2_t halves =
-      vadd_f32(vget_low_f32(accumulator), vget_high_f32(accumulator));
-  halves = vpadd_f32(halves, halves);
-  sum = vget_lane_f32(halves, 0);
-#endif
+  float sum = _mm_cvtss_f32(halves);
   for (; i < n; ++i) {
     sum += a[i] * b[i];
   }
   return sum;
+}
+#endif
+
+#if defined(MINI_LLAMA_USE_NEON)
+static float DotSimdNeon(const float* a, const float* b, int n) {
+  float32x4_t accumulator = vdupq_n_f32(0.0f);
+  int i = 0;
+  for (; i <= n - 4; i += 4) {
+#if defined(__aarch64__) || defined(__ARM_FEATURE_FMA)
+    accumulator = vfmaq_f32(accumulator, vld1q_f32(a + i), vld1q_f32(b + i));
+#else
+    accumulator = vmlaq_f32(accumulator, vld1q_f32(a + i), vld1q_f32(b + i));
+#endif
+  }
+  float32x2_t halves =
+      vadd_f32(vget_low_f32(accumulator), vget_high_f32(accumulator));
+  halves = vpadd_f32(halves, halves);
+  float sum = vget_lane_f32(halves, 0);
+  for (; i < n; ++i) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+}
+#endif
+
+static float DotSimd(const float* a, const float* b, int n) {
+#if defined(MINI_LLAMA_USE_AVX2)
+  return DotSimdAvx2(a, b, n);
+#elif defined(MINI_LLAMA_USE_NEON)
+  return DotSimdNeon(a, b, n);
+#else
+  float sum = 0.0f;
+  for (int i = 0; i < n; ++i) {
+    sum += a[i] * b[i];
+  }
+  return sum;
+#endif
 }
 
 static Tensor LinearSimd(const Tensor& x, const Tensor& weight) {
