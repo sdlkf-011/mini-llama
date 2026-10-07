@@ -2,6 +2,8 @@
 
 本文描述当前 CPU Linear、Matmul、Attention 和 CLI 的并行执行路径。
 统一接口使用 C++17 `std::thread + join`，每次调用创建线程并等待结束。
+本次量化 NEON 点积、batch 与兼容接口的完整总结见
+[SIMD 点积、量化 Linear 与 batch 支持阶段总结](simd_quantized_linear_implementation.md)。
 
 ## 源码与入口
 
@@ -9,6 +11,7 @@
 | --- | --- |
 | `include/mini_llama/thread_pool.h`、`src/thread_pool.cc` | 线程配置、连续区间切分与异常回收 |
 | `include/mini_llama/matmul_dispatch.h`、`src/matmul_optimized.cc` | F32 执行模式和 SIMD 点积 |
+| `include/mini_llama/quant.h`、`src/quant.cc` | 量化 Linear 的 NEON/scalar 点积、batch 和外层并行 |
 | `include/mini_llama/ops.h`、`src/ops.cc` | 公开算子与量化格式分发 |
 | `src/forward.cc` | CPU Attention 按 query head 并行，保留 GQA 和 bias 语义 |
 | `src/main.cc` | `--threads` 参数解析、执行配置和结果展示 |
@@ -79,6 +82,8 @@ Matmul 计算 `[m, k] × [k, n] -> [m, n]`，按输出的 `m` 行切分。B 的�
 - 其他情况：使用 scalar fallback。
 
 向量循环之后使用标量处理尾部，支持输入特征数不是向量宽度整数倍。
+平台助手分别为 `DotSimdAvx2()` 和 `DotSimdNeon()`，由 `DotSimd()` 统一分发。
+NEON 在支持 FMA 的目标上使用 `vfmaq_f32`，其他 NEON 目标保留普通乘加路径。
 这些宏反映编译目标，不做运行时 CPU 指令集检测。默认 x86 构建未启用
 AVX2/FMA 时使用 scalar fallback；在支持这些指令的目标上，可单独构建：
 
@@ -129,17 +134,22 @@ ctest --test-dir build --output-on-failure -j4
 python3 scripts/test_threaded_cli.py
 ```
 
-`tests/threaded_matmul_test.cc` 包含 9 项测试，覆盖 1/2/4 线程 Linear/Matmul
+`tests/threaded_matmul_test.cc` 包含 14 项测试，覆盖 1/2/4 线程 F32 Linear/Matmul
 与 naive 基准的浮点对照、SIMD 尾部、两种输入秩、小任务与阈值边界、非整除
 区间、空任务、超大线程配置和回调异常传播。
+量化测试另外覆盖 Q8_0/Q4_0/Q4_1 的 batch 1/3/5 与 1/2/3/4 线程对照、块尾部、
+非法 batch、任务数溢出、兼容 Matmul、误差比较接口和 Q4_0 舍入边界。
 
 Attention 使用 4 和 68 个 query head 的模型测试退化与真实并行路径，覆盖 bias、
 GQA、逐 token logits 和最终 KV Cache。浮点比较采用 `1e-5 * (1 + abs(reference))`
 容差。CLI 测试比较单线程与 4 线程的所有导出 logits 和生成 token，检查自动模式、
 非法参数以及 benchmark 输出，成功时打印 `PASS`。
 
-本次同步验证：全量 CTest 113/113，通过 `mini-llama-tests` 前缀筛选的 22 项
-全部通过；CLI 测试比较了 9 份 logits，结果为 `PASS`。这些数字是本阶段快照。
+此前多线程阶段的验证快照：全量 CTest 113/113，通过 `mini-llama-tests` 前缀
+筛选的 22 项全部通过；CLI 测试比较了 9 份 logits，结果为 `PASS`。
+最新量化与 batch 阶段针对 `ThreadedMatmulTest`、`QuantTest`、`ForwardTest` 的
+24 项全部通过，未重新运行全量 CTest 或 CLI 测试。NEON 通过语法检查，ARM
+运行验证和性能基准仍未完成。
 
 ## 当前边界与后续模块
 
@@ -147,6 +157,8 @@ GQA、逐 token logits 和最终 KV Cache。浮点比较采用 `1e-5 * (1 + abs(
 阈值目前只依据任务数，未考虑每行点积长度或各 head 的序列长度。常驻线程池与
 更精细的调度策略可在 `ParallelFor()` 接口之后作为独立模块演进。
 
-Q8_0/Q4_0/Q4_1 继续按 `QuantType` 分发到现有即时反量化点积函数，不进入
-`MatmulMode`。当前量化 Linear 为标量实现，其线程和 SIMD 优化属于后续模块。
-完整 SIMD GEMM 与 GPU 后端同样保留为独立扩展方向。
+Q8_0/Q4_0/Q4_1 继续按 `QuantType` 分发，不进入 `MatmulMode`。三种量化 Linear
+均支持 `[in_features]` 和 `[batch, in_features]`，按输入行与输出通道展平任务。
+Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，Q4_1 使用 scalar 点积，外层并行
+在两类路径中均有效。F32 Linear 的输入范围仍为单 token。
+完整 SIMD GEMM、AVX2 量化点积与 GPU 后端保留为独立扩展方向。
