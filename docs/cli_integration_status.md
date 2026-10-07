@@ -4,6 +4,8 @@
 真实模型输出和测试快照保留历史含义；当前入口行为以本文和源码为准。
 调试接口、计时口径和 `bench` 的详细设计见
 [调试与基准测试阶段实现汇总](benchmark_debug_implementation.md)。
+CPU 调度、F32 SIMD 和测试细节见
+[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 
 ## 构建与入口
 
@@ -20,7 +22,8 @@
 | `inspect` | 检查 JSON 清单或 GGUF 元数据，不加载模型权重或分词器 |
 | `inspect-gguf` | 直接检查 GGUF 文件头、元数据和张量目录 |
 
-CUDA、线程配置和整模型重新量化尚未接入 CLI。已有量化 Linear 可
+CPU 线程配置已通过 `--threads` 接入推理命令。CUDA 和整模型重新量化尚未接入
+CLI。已有量化 Linear 可
 运行 GGUF 中的 Q8_0/Q4_0/Q4_1 权重；单张量量化与模型权重字节统计仍是库能力。
 
 ## 参数与模型选择
@@ -43,6 +46,23 @@ CUDA、线程配置和整模型重新量化尚未接入 CLI。已有量化 Linea
 超过上下文的完整生成预算，`-n 0` 只执行 prefill；`run` 要求正数响应预算并根据
 当前剩余窗口截断。`bench` 接受 `-n 0` 测量纯预填充，并在达到上下文上限时停止。
 既有库调用保留按窗口剩余容量截断的行为。
+
+### CPU 线程数
+
+`generate`、`bench`、`run` 支持 `--threads N`。参数解析后在推理前调用
+`SetThreadCount(N)`：正数设置线程数，`0` 恢复自动模式；自动模式使用硬件
+并发数，获取失败时回退为 4。CLI 接受 `0..1000000`，拒绝负数、非法文本和溢出。
+新进程默认自动模式；库入口 `Run()` 未指定选项时保留当前线程配置。
+
+```bash
+./build/mini-llama generate models/tiny --prompt hello --n-predict 4 --threads 4
+./build/mini-llama bench models/tiny --prompt hello --n-predict 4 --threads 4 --verbose
+```
+
+`generate` 和 `bench` 输出实际解析的配置线程数，例如 `threads: 4`。
+Linear 按输出通道、Matmul 按输出行、CPU Attention 按 query head 复用
+`ParallelFor()`。小任务和单线程配置直接在调用线程执行，因此该输出不等于
+每个算子创建的线程数。Q8_0/Q4_0/Q4_1 Linear 的并行优化仍是后续模块。
 
 ## 分词器与特殊 token 校验
 
@@ -79,6 +99,8 @@ decode，并更新上下文与请求指标。首个 token 也检查 EOS；最后
 decode。首个生成 token 直接从 prefill logits 采样，因此生成 N 个 token 通常
 只有 N-1 次 decode。`--verbose` 输出 logits Top-k 和 KV Cache 状态，诊断时可用，
 正式测量吞吐量时应关闭。
+结果同时输出 `tokens/s (total):`、`tokens/s (Decode):`，保留原有
+`throughput:` 和 `decode throughput:` 标签。
 
 `RunChat()` 驱动交互，`RunChatTurn()` 根据 RadixTree 命中与当前物理上下文的
 公共前缀确定复用范围，只对缺失后缀 prefill。正常生成结束后提交消息与缓存
@@ -112,10 +134,14 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 运行以下命令验证当前源码：
 
 ```bash
-cmake --build build -j2
-ctest --test-dir build --output-on-failure -j2
+cmake --build build -j4
+ctest --test-dir build -R mini-llama-tests --output-on-failure
+ctest --test-dir build --output-on-failure -j4
+python3 scripts/test_threaded_cli.py
 ```
 
-当前回归在既有模型加载、Tokenizer、生成、聊天和检查命令之外，新增 8 项调试
-模块单元测试与 1 项 `bench` CLI 集成测试。本次同步后构建成功，全量 CTest
-**104/104 通过**。历史文档中的 82、95 项测试是对应阶段快照，不代表当前数量。
+当前回归在模型加载、Tokenizer、生成、聊天、检查命令和基准测试之外，新增
+`tests/threaded_matmul_test.cc` 的 9 项多线程测试，CMake 引用与当前文件名一致。
+本次同步后构建成功，全量 CTest **113/113 通过**；`mini-llama-tests` 前缀
+筛选结果为 **22/22 通过**。CLI 脚本验证线程配置、9 份导出 logits 和生成结果，
+输出 `PASS`。历史文档中的 82、95、104 项测试是对应阶段快照。

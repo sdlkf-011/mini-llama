@@ -28,6 +28,7 @@
 #include "mini_llama/request_context.h"
 #include "mini_llama/sampler.h"
 #include "mini_llama/terminal.h"
+#include "mini_llama/thread_pool.h"
 #include "mini_llama/tokenizer.h"
 
 // 命令行装配层：选择资源并组织现有模块，不在入口中实现计算后端
@@ -79,6 +80,7 @@ struct CommandOptions {
   std::string vocab_path;
   std::string prompt;
   int n_predict = 16;  // generate 的总生成预算，或 run 的单轮响应上限
+  int n_threads = -1;  // 未指定时保留当前配置；0 表示自动线程数
   SamplingParams sampling;
   std::string dump_logits_dir;
   bool verbose = false;
@@ -172,6 +174,8 @@ void PrintCommandUsage(const char* prog, const std::string& command,
                              : "Tokens to generate (default: 16; 0 = prefill only)")
         << "\n"
         << "  --max-tokens <n>      Legacy alias for --n-predict\n"
+        << "  --threads <N>         CPU threads (0 = automatic; default: "
+           "automatic)\n"
         << "  --seed <S>            Random seed (default: 0 = random)\n";
 
     if (IsGenerationCommand(command)) {
@@ -260,6 +264,8 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
                (option == "-n" || option == "--n-predict" ||
                 option == "--max-tokens")) {
       options.n_predict = ParseIntArg(read_value(i, option), option);
+    } else if (IsInferenceCommand(options.command) && option == "--threads") {
+      options.n_threads = ParseIntArg(read_value(i, option), option);
     } else if (IsGenerationCommand(options.command) && option == "--temperature") {
       options.sampling.temperature = ParseFloatArg(read_value(i, option), option);
     } else if (IsGenerationCommand(options.command) && option == "--top-k") {
@@ -712,6 +718,7 @@ int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
   const auto generated =
       GenerateTokens(loaded.model, *loaded.tokenizer, options, request, true);
   output << "mini-llama.cpp\n==============\n\n"
+         << "threads: " << GetThreadCount() << '\n'
          << "prompt: " << options.prompt << '\n'
          << "sampling: temperature=" << options.sampling.temperature
          << ", top_k=" << options.sampling.top_k
@@ -753,6 +760,7 @@ int RunBench(const LoadedModel& loaded, const CommandOptions& options,
   const std::streamsize old_precision = output.precision();
   output << "mini-llama benchmark\n"
          << "====================\n"
+         << "threads: " << GetThreadCount() << '\n'
          << "prompt tokens: " << result.n_prompt_tokens << '\n'
          << "generated tokens: " << result.n_generated_tokens << '\n'
          << "decode tokens: " << result.n_decode_tokens << '\n'
@@ -760,7 +768,9 @@ int RunBench(const LoadedModel& loaded, const CommandOptions& options,
          << " ms\n"
          << "decode: " << result.decode_ms << " ms\n"
          << "throughput: " << result.tokens_per_sec() << " tokens/s\n"
-         << "decode throughput: " << result.decode_tokens_per_sec() << " tokens/s\n";
+         << "decode throughput: " << result.decode_tokens_per_sec() << " tokens/s\n"
+         << "tokens/s (total): " << result.tokens_per_sec() << '\n'
+         << "tokens/s (Decode): " << result.decode_tokens_per_sec() << '\n';
   output.flags(old_flags);
   output.precision(old_precision);
   return 0;
@@ -1074,6 +1084,9 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
       PrintCommandUsage(argv[0], options.command, output);
       return 0;
     }
+    if (options.n_threads >= 0) {
+      SetThreadCount(options.n_threads);
+    }
     if (options.command == "run") {
       // 此接口没有模板参数，沿用纯文本聊天，并关闭逐轮追踪输出
       return RunChat(model, tokenizer, "", options, input, output, "", false);
@@ -1139,6 +1152,9 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
     }
     if (options.command == "inspect") {
       return RunInspect(ResolveModelPaths(options), output);
+    }
+    if (options.n_threads >= 0) {
+      SetThreadCount(options.n_threads);
     }
 
     // 当前推理由 CPU 模块执行；后续后端接入时在装配层传入实际后端名称

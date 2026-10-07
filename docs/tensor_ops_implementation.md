@@ -3,8 +3,10 @@
 ## 实现范围
 
 - `Tensor` 提供 F32 稠密张量，保存 `shape` 与连续 `data`，支持 1D 至 4D 便捷访问、通用多维索引、二维行指针、shape 校验和安全重塑。
-- `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`。当前仅暴露并默认使用已完成的朴素模式；分发入口保持独立，后续后端实现完成后可显式接入。
+- `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`。支持 `kNaive`、`kThreaded`、`kSimd`、`kThreadedSimd`；默认模式为 `kThreadedSimd`，通用 Matmul 的 SIMD 模式回退到按输出行并行的标量实现。
 - `LinearDispatch` 支持 `[in_features]` 与 `[1, in_features]` 输入，按 `x @ weight^T` 计算并保持输入秩。
+- F32 Linear 默认按输出通道调用 `ParallelFor()`，每行使用 AVX2/FMA、NEON 或 scalar 点积；权重仍按 `[out_features, in_features]` 连续存储。
+- `Linear(x, QuantizedTensor)` 独立按 F32/Q8_0/Q4_0/Q4_1 格式分发；量化路径继续即时反量化点积，其并行优化属于后续模块。
 - `RmsNorm`、`Softmax`、`Silu`、`ElementwiseMul`、`SwiGlu` 和 `ArgMax` 提供推理所需的基础逐元素及归约算子。
 
 ## 正确性审查
@@ -26,12 +28,19 @@
 - 2×3 与 3×2 矩阵乘法，验证当前朴素 dispatch 模式和错误维度处理。
 - 一维与二维 Linear、RMSNorm、稳定 Softmax、Silu、逐元素乘法、SwiGLU 和 ArgMax。
 
+`tests/threaded_matmul_test.cc` 补充 9 项测试，覆盖多种执行模式和线程数、SIMD
+尾部、小任务、非整除切分、回调异常，以及带 bias/GQA 的并行 Attention。
+实现与测试矩阵见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
+
 ## 验证方式
 
 ```bash
 cmake -S . -B build
-cmake --build build -j2
-./build/mini-llama-tests
+cmake --build build -j4
+ctest --test-dir build -R '^TensorTest\.' --output-on-failure
+ctest --test-dir build -R 'mini-llama-tests\.ThreadedMatmulTest\.' --output-on-failure
+python3 scripts/test_threaded_cli.py
 ```
 
-测试矩阵保持在 3×3 以内，便于定位数值和索引错误；测试程序输出每个测试组的通过/失败状态及汇总结果。
+基础算子测试保留可手算的小矩阵；多线程测试另用 67 个输出行跨过并行阈值，
+验证真实多线程路径。CTest 输出每个独立测试的通过/失败状态及汇总结果。

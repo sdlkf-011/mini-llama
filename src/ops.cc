@@ -6,6 +6,7 @@
 
 #include "mini_llama/matmul_dispatch.h"
 #include "mini_llama/model.h"
+#include "mini_llama/quant.h"
 #include "mini_llama/tensor.h"
 
 namespace mini_llama {
@@ -16,6 +17,21 @@ Tensor Matmul(const Tensor& a, const Tensor& b) {
 
 Tensor Linear(const Tensor& x, const Tensor& weight) {
   return LinearDispatch(x, weight, DefaultMatmulMode());
+}
+
+// 量化线性分派
+Tensor Linear(const Tensor& x, const QuantizedTensor& weight) {
+  switch (weight.type) {
+    case QuantType::kF32:
+      return Linear(x, ToTensor(weight));
+    case QuantType::kQ80:
+      return LinearQ80(x, weight.q8_0_data, weight.shape);
+    case QuantType::kQ40:
+      return LinearQ40(x, weight.q4_0_data, weight.shape);
+    case QuantType::kQ41:
+      return LinearQ41(x, weight.q4_1_data, weight.shape);
+  }
+  throw std::runtime_error("Linear: unsupported weight type");
 }
 
 Tensor RmsNorm(const Tensor& x, const Tensor& weight, float eps) {

@@ -107,7 +107,11 @@ data ：按行优先连续存放的 float
 | `Rope` | 给 Q、K 注入位置信息 |
 | `ArgMax` | 贪心采样选择最大 logit |
 
-`MatmulDispatch` 当前仅暴露已经完成的朴素 CPU 模式。dispatch 结构仍保留为独立扩展点，线程或 SIMD 后端只有在实现完成并通过测试后才应加入公开枚举。
+`MatmulDispatch` 与 `LinearDispatch` 当前支持 naive、threaded、simd 和
+threaded-simd 四种 F32 执行模式，默认使用 threaded-simd。Linear 按输出通道
+并行并对连续权重行使用 SIMD 点积；通用 Matmul 的 SIMD 模式暂时回退到按行
+并行的标量实现。调度、SIMD 选择与测试见
+[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 
 ### 3.2 模型结构与模型加载器
 
@@ -579,7 +583,8 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 
 复习时要把“已经有组件”和“已经端到端自动接线”区分开：
 
-- 当前提供 CPU F32 与 Q8_0/Q4_0/Q4_1 标量 Linear；量化路径尚未使用 SIMD，
+- 当前 F32 Linear 已支持多线程与 SIMD，CPU Attention 按 head 复用
+  `ParallelFor()`，CLI 支持 `--threads`。Q8_0/Q4_0/Q4_1 Linear 仍为标量路径，
   embedding 仍为 F32，也没有 GPU 后端。
 - `MiniBatch` 内部仍逐 token 执行，不是并行 batch 推理。
 - 项目同时构建核心库、CLI 与测试，`main()` 只在可执行目标中启用。

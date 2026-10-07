@@ -2,6 +2,8 @@
 
 > 本文记录 `feature/benchmark-design` 阶段完成时的实现状态。命令行的整体装配
 > 约定见[命令行与模块同步说明](cli_integration_status.md)。
+> 本文的 CLI 示例已同步线程配置与输出标签；CPU 并行路径见
+> [CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 
 本阶段在现有模型加载、Tokenizer、`ForwardBatch()` 和 `MiniSampler` 之上增加了
 独立的调试与基准测试模块，并把它接入 `mini-llama bench` 命令。目标是用同一套
@@ -135,7 +137,7 @@ n_decode_tokens    = max(N - 1, 0)
 
 | 选项 | 默认值 | 行为 |
 | --- | --- | --- |
-| `-m, --model <path|dir>` | 无 | 指定二进制、GGUF 或模型目录；也可使用位置参数 |
+| `-m, --model <path\|dir>` | 无 | 指定二进制、GGUF 或模型目录；也可使用位置参数 |
 | `--config <path>` | 自动推导 | 指定 JSON+BIN 模型清单 |
 | `--weights <path>` | 无 | `--model` 的旧版二进制权重别名 |
 | `--tokenizer <path>` | 自动选择 | 指定 tokenizer 目录或 `vocab.json` |
@@ -143,6 +145,7 @@ n_decode_tokens    = max(N - 1, 0)
 | `-p, --prompt <text>` | `hello` | 指定需要编码和预填充的文本 |
 | `-n, --n-predict <n>` | `16` | 指定生成预算；`0` 表示只测预填充 |
 | `--max-tokens <n>` | `16` | `--n-predict` 的旧版别名 |
+| `--threads <N>` | 自动 | 正数设置 CPU 线程数；`0` 恢复自动模式 |
 | `--seed <n>` | `0` | 设置采样器种子 |
 | `--verbose` | 关闭 | 输出 logits 和 KV Cache 调试信息 |
 
@@ -157,7 +160,8 @@ n_decode_tokens    = max(N - 1, 0)
 ./build/mini-llama bench models/tiny \
   --prompt hello \
   --n-predict 16 \
-  --seed 42
+  --seed 42 \
+  --threads 4
 ```
 
 输出结构如下，实际耗时取决于硬件、模型和系统负载：
@@ -165,6 +169,7 @@ n_decode_tokens    = max(N - 1, 0)
 ```text
 mini-llama benchmark
 ====================
+threads: 4
 prompt tokens: 6
 generated tokens: 16
 decode tokens: 15
@@ -172,7 +177,14 @@ prefill: <毫秒> ms
 decode: <毫秒> ms
 throughput: <每秒 token 数> tokens/s
 decode throughput: <每秒 token 数> tokens/s
+tokens/s (total): <整体生成吞吐量>
+tokens/s (Decode): <逐 token 解码吞吐量>
 ```
+
+`threads` 是已解析的配置线程数。每个算子通过 `ParallelFor()` 按任务量决定
+是否创建线程，小任务仍直接执行。新进程使用自动模式，`--threads 0` 从硬件
+并发数选择配置，获取失败时回退为 4；比较性能时应显式固定线程数。
+新旧两组吞吐标签使用相同的 `BenchmarkResult` 计算函数。
 
 ### 只测预填充
 
@@ -187,7 +199,7 @@ decode throughput: <每秒 token 数> tokens/s
 ### 查看详细状态
 
 ```bash
-./build/mini-llama bench models/tiny -p hello -n 2 --verbose
+./build/mini-llama bench models/tiny -p hello -n 4 --threads 4 --verbose
 ```
 
 使用该模式检查 logits 排名、KV Cache shape 和位置推进。需要记录性能数字时应
@@ -255,9 +267,14 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-当前完整构建成功，CTest **104/104** 通过，`git diff --check` 通过。手工执行
+基准模块阶段完成时，完整构建成功，CTest **104/104** 通过。手工执行
 `bench models/tiny -p hello -n 2 --seed 42` 可得到 2 个生成 token、1 次 decode
 及对应的 prefill/decode 吞吐量。
+
+加入 CPU 多线程后，当前完整回归为 113/113，`mini-llama-tests` 前缀测试为
+22/22。`python3 scripts/test_threaded_cli.py` 检查 1/4/自动线程配置、logits
+和生成结果一致性，以及本节示例中的输出标签；测试入口使用当前文件名
+`tests/threaded_matmul_test.cc`。完整说明见 CPU 多线程文档。
 
 ## 当前边界
 
@@ -271,13 +288,16 @@ ctest --test-dir build --output-on-failure
   `RequestContext` 中。
 - `decode_ms` 覆盖逐 token 前向、采样以及 verbose 模式下的循环内输出，因此
   性能比较必须关闭 `--verbose`。
-- 当前 CPU 路径没有线程数或后端选择选项，基准结果不能直接代表其他后端。
+- 当前 CPU 路径支持 `--threads`，仍没有 GPU 后端选择选项。F32 Linear 使用
+  SIMD/线程分发，Attention 按 head 并行；量化 Linear 继续使用现有标量路径，
+  因此基准结果不能概括为全部算子都已多线程或 SIMD 化。
 - `DumpKvCacheInfo()` 面向正常构造的四维 `KvCache`，不负责诊断损坏或未初始化的
   cache shape。
 
 ## 相关文档
 
 - [命令行与模块同步说明](cli_integration_status.md)
+- [CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)
 - [KV Cache、Context 与 Forward 实现说明](kv_cache_context_implementation.md)
 - [Sampler、采样策略与生成入口阶段实现汇总](sampler_sampling_strategy_implementation.md)
 
