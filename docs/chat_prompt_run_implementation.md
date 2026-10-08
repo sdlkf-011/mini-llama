@@ -31,7 +31,7 @@ ChatMessage[] ──PromptBuilder──→ prompt string
 
 | 文件 | 职责 |
 | --- | --- |
-| `include/mini_llama/prompt_builder.h` | 保持既有 `SetChatTemplate()`、`Build()` 接口 |
+| `include/mini_llama/prompt_builder.h` | 保留 `SetChatTemplate()`、`Build()` 接口 |
 | `src/prompt_builder.cc` | Plain、内置 Qwen2 和轻量 Jinja2 模板执行 |
 | `src/main.cc` | 从 GGUF 装配 chat template，并将其注入 `PromptBuilder` |
 | `tests/unit/chat_test.cc` | PromptBuilder、会话和 `run` 模式单元测试 |

@@ -3,11 +3,13 @@
 > 当前完整模块清单见 [README](../README.md)，入口与构建状态见
 > [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
 > 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
-
+>
 > 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
 > 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
 
-本阶段（`feature/sampler-sampling-strategy`）在已有 Tensor、Tokenizer、推理上下文和前向传播能力上，补充了采样参数、贪心采样、温度采样、Top-k 采样，以及把采样参数接入当前生成流程的基础入口。实现保持在现有项目接口范围内，没有提前引入尚未完成的模型加载、Chat、PromptBuilder、终端交互或后端选择模块。
+本阶段（`feature/sampler-sampling-strategy`）在已有 Tensor、Tokenizer、推理上下文和前向传播能力上，
+补充了采样参数、贪心采样、温度采样、Top-k 采样，以及把采样参数接入当前生成流程的基础入口。实现保持在现有项目接口范围内，没有提前引入尚未完成的模型加载、
+Chat、PromptBuilder、终端交互或后端选择模块。
 
 ## 实现范围
 
@@ -22,7 +24,8 @@
 
 ### 贪心采样
 
-`SampleGreedy` 直接调用现有 `ArgMax` 算子，返回 logits 最大值对应的 token ID。温度小于 `1e-6` 或 `top_k == 1` 时也会进入该路径，避免不必要的概率计算和随机数消耗。
+`SampleGreedy` 直接调用现有 `ArgMax` 算子，返回 logits 最大值对应的 token ID。温度小于 `1e-6` 或
+`top_k == 1` 时也会进入该路径，避免不必要的概率计算和随机数消耗。
 
 ### 温度采样
 
@@ -103,7 +106,8 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-当前环境已完成核心库构建、代码格式检查和独立采样烟雾验证。若 CMake 配置时启用测试并可获得 GTest，可通过上述 `ctest` 命令运行 sampler 单元测试。
+当前环境已完成核心库构建、代码格式检查和独立采样烟雾验证。若 CMake 配置时启用测试并可获得 GTest，可通过上述 `ctest` 命令运行
+sampler 单元测试。
 
 ## 当前边界
 

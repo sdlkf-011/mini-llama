@@ -1457,4 +1457,7 @@ CLI 把模型、tokenizer、template、runtime 和 trace 统一装配；
 
 可以用下面这句话检查自己是否重新掌握了第二个大模块：
 
-> GgufReader 先安全解析真实模型的 metadata、tensor directory 和数据范围；GgufLoader 再把架构配置、GGUF shape 和量化权重映射成 MiniLlamaModel；GgufTokenizer 与 PromptBuilder 从同一文件恢复词表和聊天格式；RunMain 统一解析路径、选择资源并接入第一大模块的 Forward、KV Cache 和 Sampler，最终通过 inspect、generate、run、trace 与全量测试证明真实 Qwen2 GGUF 可以稳定完成端到端推理。
+> GgufReader 先安全解析真实模型的 metadata、tensor directory 和数据范围；GgufLoader 再把架构配置、GGUF
+> shape 和量化权重映射成 MiniLlamaModel；GgufTokenizer 与 PromptBuilder 从同一文件恢复词表和聊天格式；
+> RunMain 统一解析路径、选择资源并接入第一大模块的 Forward、KV Cache 和 Sampler，最终通过 inspect、generate、
+> run、trace 与全量测试证明真实 Qwen2 GGUF 可以稳定完成端到端推理。

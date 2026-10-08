@@ -6,11 +6,17 @@
 
 ## 实现范围
 
-- `Tensor` 提供 F32 稠密张量，保存 `shape` 与连续 `data`，支持 1D 至 4D 便捷访问、通用多维索引、二维行指针、shape 校验和安全重塑。
-- `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`。支持 `kNaive`、`kThreaded`、`kSimd`、`kThreadedSimd`；默认模式为 `kThreadedSimd`，通用 Matmul 的 SIMD 模式回退到按输出行并行的标量实现。
+- `Tensor` 提供 F32 稠密张量，保存 `shape` 与连续 `data`，支持 1D 至 4D 便捷访问、通用多维索引、二维行指针、shape
+  校验和安全重塑。
+- `MatmulDispatch` 实现 `[m, k] × [k, n] -> [m, n]`。支持 `kNaive`、`kThreaded`、
+  `kSimd`、`kThreadedSimd`；默认模式为 `kThreadedSimd`，通用 Matmul 的 SIMD
+  模式回退到按输出行并行的标量实现。
 - `LinearDispatch` 支持 `[in_features]` 与 `[1, in_features]` 输入，按 `x @ weight^T` 计算并保持输入秩。
-- F32 Linear 默认按输出通道调用 `ParallelFor()`，每行使用 AVX2/FMA、NEON 或 scalar 点积；权重仍按 `[out_features, in_features]` 连续存储。
-- `Linear(x, QuantizedTensor)` 独立按 F32/Q8_0/Q4_0/Q4_1 格式分发。本阶段完善的 `LinearQ80/Q40/Q41` 均支持 batch，并按输入行与输出通道并行；Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，Q4_1 使用 scalar 点积。
+- F32 Linear 默认按输出通道调用 `ParallelFor()`，每行使用 AVX2/FMA、NEON 或 scalar 点积；权重仍按
+  `[out_features, in_features]` 连续存储。
+- `Linear(x, QuantizedTensor)` 独立按 F32/Q8_0/Q4_0/Q4_1 格式分发。本阶段完善的
+  `LinearQ80/Q40/Q41` 均支持 batch，并按输入行与输出通道并行；Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，
+  Q4_1 使用 scalar 点积。
 - `RmsNorm`、`Softmax`、`Silu`、`ElementwiseMul`、`SwiGlu` 和 `ArgMax` 提供推理所需的基础逐元素及归约算子。
 
 ## 正确性审查

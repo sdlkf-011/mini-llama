@@ -80,12 +80,12 @@ Q4_0 使用 nibble 8 编码零值。
 
 ## 量化 Linear 的 batch 与线程调度
 
-Q8_0、Q4_0、Q4_1 统一支持以下形状：
+Q8_0、Q4_0、Q4_1 统一支持以下形状；`in`/`out` 分别表示 `in_features`/`out_features`：
 
 | 输入 | 权重形状 | 输出 |
 | --- | --- | --- |
-| `[in_features]` | `[out_features, in_features]` | `[out_features]` |
-| `[batch, in_features]` | `[out_features, in_features]` | `[batch, out_features]` |
+| `[in]` | `[out, in]` | `[out]` |
+| `[batch, in]` | `[out, in]` | `[batch, out]` |
 
 输入必须为一维或二维，batch 必须为正数，权重必须为正维度的二维形状，输入
 特征数必须匹配。权重块数为：

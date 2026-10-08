@@ -14,8 +14,8 @@
 | 文件 | 职责 |
 | --- | --- |
 | `include/mini_llama/thread_pool.h`、`src/thread_pool.cc` | 线程配置、连续区间切分与异常回收 |
-| `include/mini_llama/matmul_dispatch.h`、`src/matmul_optimized.cc` | F32 执行模式和 SIMD 点积 |
-| `include/mini_llama/quant.h`、`src/quant.cc` | 量化 Linear 的 NEON/scalar 点积、batch 和外层并行 |
+| [matmul_dispatch.h][dispatch]、`src/matmul_optimized.cc` | F32 执行模式和 SIMD 点积 |
+| [quant.h][quant]、`src/quant.cc` | 量化 Linear：NEON/scalar 点积、batch 与并行 |
 | `include/mini_llama/ops.h`、`src/ops.cc` | 公开算子与量化格式分发 |
 | `src/forward.cc` | CPU Attention 按 query head 并行，保留 GQA 和 bias 语义 |
 | `src/main.cc` | `--threads` 参数解析、执行配置和结果展示 |
@@ -168,3 +168,6 @@ Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，Q4_1 使用 scalar 点积�
 完整 SIMD GEMM 与 AVX2 量化点积仍未实现。Backend/CUDA Runtime、权重上传与
 设备 Tensor 已有库实现；上传不切换 CPU 前向，CUDA 算子、CLI CUDA 推理和 GPU
 Attention/KV Cache 尚未完成，见 [CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
+
+[dispatch]: ../include/mini_llama/matmul_dispatch.h
+[quant]: ../include/mini_llama/quant.h

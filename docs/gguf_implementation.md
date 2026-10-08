@@ -18,7 +18,8 @@
 ## 测试与构建
 
 - `tests/gguf_test.cc` 位于 `tests` 根目录，覆盖正常加载、类型化元数据、原始张量、仓库 fixture 和损坏输入。
-- `tests/CMakeLists.txt` 为 `tests/unit/gguf_test.cc` 注册 `mini-llama-gguf-tests`，根目录文件对应 `mini-llama-gguf-integration-tests`。
+- `tests/CMakeLists.txt` 为 `tests/unit/gguf_test.cc` 注册 `mini-llama-gguf-tests`，
+  根目录文件对应 `mini-llama-gguf-integration-tests`。
 - 生成 fixture：
 
   ```bash
@@ -29,4 +30,5 @@
 
 ## 边界
 
-当前读取器只实现 GGUF v3 和上述 GGML 类型子集；未知张量布局不会被当作可读取的权重。GGUF tokenizer 仍由独立的 `GgufTokenizer` 负责词表和 BPE 元数据处理。
+当前读取器只实现 GGUF v3 和上述 GGML 类型子集；未知张量布局不会被当作可读取的权重。GGUF tokenizer 仍由独立的
+`GgufTokenizer` 负责词表和 BPE 元数据处理。

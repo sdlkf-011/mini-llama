@@ -3,7 +3,7 @@
 > 当前完整模块清单见 [README](../README.md)，入口与构建状态见
 > [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
 > 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
-
+>
 > 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
 > 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
 

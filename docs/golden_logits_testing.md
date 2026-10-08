@@ -60,7 +60,8 @@ prefill logits。greedy 并列时选择最小 token ID。
 ```bash
 build/mini-llama generate --model models/tiny --prompt hello --n-predict 4 \
   --temperature 0 --top-k 0 --dump-logits /tmp/mini-llama-cpp-golden
-python3 scripts/make_golden.py --model models/tiny --prompt hello --n-predict 4 \
+python3 scripts/make_golden.py --model models/tiny --prompt hello \
+  --n-predict 4 \
   --output-dir /tmp/mini-llama-python-golden
 python3 scripts/compare_logits.py --cpp-dir /tmp/mini-llama-cpp-golden \
   --python-dir /tmp/mini-llama-python-golden

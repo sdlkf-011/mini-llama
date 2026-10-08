@@ -3,13 +3,15 @@
 > 当前完整模块清单见 [README](../README.md)，入口与构建状态见
 > [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
 > 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
-
+>
 > 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
 > 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
 > 当前 F32 Linear 分发与 CPU Attention 按 head 并行见
 > [CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 
-本阶段（`feature/kv_cache-and-context`）在 Tensor、基础算子和 Tokenizer 的基础上，补充了模型结构、批处理、KV Cache、压缩前缀树、请求追踪以及单 token/批量前向推理能力。实现面向教学用途，当前使用 CPU 上的 F32 张量，同时为后续量化和 GPU 后端保留了包装层接口。
+本阶段（`feature/kv_cache-and-context`）在 Tensor、基础算子和 Tokenizer 的基础上，补充了模型结构、批处理、KV
+Cache、压缩前缀树、请求追踪以及单 token/批量前向推理能力。实现面向教学用途，当前使用 CPU 上的 F32 张量，同时为后续量化和 GPU
+后端保留了包装层接口。
 
 ## 实现范围
 
@@ -30,14 +32,17 @@ keys   : [n_layers, max_seq_len, n_kv_heads, head_dim]
 values : [n_layers, max_seq_len, n_kv_heads, head_dim]
 ```
 
-`Write(layer, pos, k, v)` 将形状为 `[n_kv_heads, head_dim]` 的当前 token 键和值复制到指定层和位置。`KeyPtr` 与 `valuePtr` 返回指定头的连续内存指针，供注意力计算遍历历史位置。写入前会检查缓存秩、层/位置范围以及输入张量形状，访问接口也会拒绝越界参数。
+`Write(layer, pos, k, v)` 将形状为 `[n_kv_heads, head_dim]` 的当前 token 键和值复制到指定层和位置。
+`KeyPtr` 与 `valuePtr` 返回指定头的连续内存指针，供注意力计算遍历历史位置。写入前会检查缓存秩、层/位置范围以及输入张量形状，
+访问接口也会拒绝越界参数。
 
 ### MiniBatch 与前向入口
 
 - `MiniBatch::Single(token, pos)` 构造单 token 解码批次。
 - `MiniBatch::FromTokens(tokens, start_pos)` 构造连续位置的多 token prefill 批次。
 - `ForwardToken` 处理一个 token，当前位置由 `ctx.pos` 指定；函数更新各层 KV Cache，但不自动推进 `ctx.pos`。
-- `ForwardBatch` 按批次顺序调用 `ForwardToken`，在每一步设置位置并追加 token 历史，返回最后一个 token 的 logits，因此统一了 prefill 和 decode 路径。
+- `ForwardBatch` 按批次顺序调用 `ForwardToken`，在每一步设置位置并追加 token 历史，返回最后一个 token 的
+  logits，因此统一了 prefill 和 decode 路径。
 - 空批次以及 tokens/positions 长度不一致会立即报错。
 
 ### Transformer 前向计算
@@ -47,11 +52,15 @@ values : [n_layers, max_seq_len, n_kv_heads, head_dim]
 1. 校验模型加载状态、配置约束、token/位置范围、缓存形状和所有层权重形状。
 2. 从 `[vocab_size, dim]` 嵌入表复制 token 对应的隐藏向量。
 3. 每层执行 Pre-Norm 注意力：RMSNorm → Q/K/V Linear（支持可选 bias）→ RoPE → 因果自注意力 → O 投影 → 残差。
-4. 注意力使用 GQA 映射：多个 query head 按比例共享 KV head；分数乘以 `1/sqrt(head_dim)`，只读取 `0..pos` 的缓存位置以保证因果性。
-5. 每层继续执行 Pre-Norm SwiGLU FFN：RMSNorm → `w_gate/w_up` → `Silu(gate) * up` → `w_down` → 残差。
+4. 注意力使用 GQA 映射：多个 query head 按比例共享 KV head；分数乘以 `1/sqrt(head_dim)`，只读取
+   `0..pos` 的缓存位置以保证因果性。
+5. 每层继续执行 Pre-Norm SwiGLU FFN：RMSNorm → `w_gate/w_up` → `Silu(gate) * up` →
+   `w_down` → 残差。
 6. 最终执行 RMSNorm 和 LM Head，输出形状为 `[vocab_size]` 的 logits。
 
-前向实现通过 `ForwardLinear`、`ForwardRmsNorm`、`ForwardSwiGlu`、`ForwardSoftmax` 和 `ForwardRope` 进行算子封装。当前 CPU Linear 已按 F32/Q8_0/Q4_0/Q4_1 分发；CPU Attention 按 head 并行。
+前向实现通过 `ForwardLinear`、`ForwardRmsNorm`、`ForwardSwiGlu`、`ForwardSoftmax` 和
+`ForwardRope` 进行算子封装。当前 CPU Linear 已按 F32/Q8_0/Q4_0/Q4_1 分发；CPU Attention 按
+head 并行。
 CUDA Tensor 与权重上传属于库能力，不切换 CPU 前向；KV Cache 与 Attention
 仍在 CPU。设备侧现状见 [CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
 
@@ -86,7 +95,9 @@ Q 和 K 应用位置旋转，V 不参与旋转。实现检查输入为二维张�
 
 ## 校验与错误处理
 
-前向入口集中校验以下条件：模型必须已加载；配置参数必须为正且满足 `dim == n_heads * head_dim`、`n_heads` 可被 `n_kv_heads` 整除；RoPE/RMSNorm 参数必须有效；token、位置和缓存索引必须在范围内；嵌入、LM Head、层权重和偏置形状必须匹配。错误通过 `std::runtime_error` 或 `std::out_of_range` 报告，并在信息中包含相关阶段或张量名称。
+前向入口集中校验以下条件：模型必须已加载；配置参数必须为正且满足 `dim == n_heads * head_dim`、`n_heads` 可被
+`n_kv_heads` 整除；RoPE/RMSNorm 参数必须有效；token、位置和缓存索引必须在范围内；嵌入、LM Head、层权重和偏置形状必须匹配。
+错误通过 `std::runtime_error` 或 `std::out_of_range` 报告，并在信息中包含相关阶段或张量名称。
 
 ## 单元测试与验证
 
@@ -94,7 +105,8 @@ Q 和 K 应用位置旋转，V 不参与旋转。实现检查输入为二维张�
 
 - `tests/unit/kv_cache_test.cc`：写入/读取寻址，以及形状和越界校验。
 - `tests/radix_tree_test.cc`：共享前缀、最长匹配、重复插入、清空和移动语义。
-- `tests/unit/chat_test.cc`：覆盖 PromptBuilder、终端和 Run 编排；`MiniLlamaContext` 的生命周期与 token 历史另在前向和 batch 测试中检查。
+- `tests/unit/chat_test.cc`：覆盖 PromptBuilder、终端和 Run 编排；`MiniLlamaContext`
+  的生命周期与 token 历史另在前向和 batch 测试中检查。
 - `tests/request_context_test.cc`：请求启动、事件记录、耗时、摘要格式化、错误状态和事件顺序。
 - `tests/unit/forward_test.cc`：单 token 前向结果、KV Cache 写入、批量与逐 token 等价性、上下文状态维护和非法输入校验。
 

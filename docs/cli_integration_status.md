@@ -142,6 +142,9 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 
 ## 回归验证
 
+本阶段接口、所有权与测试覆盖见
+[CUDA Tensor 与模型权重上传阶段总结](cuda_tensor_model_weights_implementation.md)。
+
 已移除不存在的 GPU 前向测试注册，保留 CPU 前向并注册实际存在的 Runtime
 与 CUDA Tensor 测试。Runtime 的零长度操作、设备信息格式、设备恢复及 Reset
 失败状态保持已与既有测试约定对齐；CUDA Tensor 移动后源对象恢复为空。

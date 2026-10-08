@@ -28,12 +28,12 @@ Token 解码与文本输出
 
 | 层次 | 主要模块 | 核心职责 |
 | --- | --- | --- |
-| 数值基础层 | `Tensor`、`ops`、`matmul_dispatch` | 保存 F32 数据，完成矩阵乘法、归一化、激活、RoPE 等基础计算 |
+| 数值基础层 | `Tensor`、`ops`、`matmul_dispatch` | F32 数据与矩阵乘法、归一化、激活、RoPE |
 | 模型资源层 | `model`、`loader`、`tokenizer` | 描述并加载模型权重，把文本与 token ID 相互转换 |
-| 推理状态层 | `MiniLlamaContext`、`KvCache`、`MiniBatch` | 保存一次推理的动态状态，组织 prefill/decode 输入 |
+| 推理状态层 | `MiniLlamaContext`、`KvCache`、`MiniBatch` | 推理状态与 prefill/decode 输入 |
 | Transformer 计算层 | `forward` | 把输入 token 逐层变换为下一 token 的 logits |
 | 生成策略层 | `sampler` | 根据 logits 选择下一个 token |
-| 应用编排层 | `PromptBuilder`、`ChatSession`、`Terminal`、`main.cc` | 拼接对话、驱动生成循环、管理多轮状态并输出文本 |
+| 应用编排层 | `PromptBuilder`、`ChatSession`、`Terminal`、`main.cc` | 对话、生成、多轮状态与文本输出 |
 
 辅助模块 `RadixTree` 已接入聊天前缀复用，`RequestContext` 已接入 CLI 的生成流程和每轮聊天，记录阶段事件、token 数及成功或失败状态。
 
@@ -98,7 +98,8 @@ shape：张量各维长度
 data ：按行优先连续存放的 float
 ```
 
-它提供索引、行指针、shape 检查和安全 reshape。上层模块几乎不直接管理裸内存，而是通过 `Tensor` 传递权重、隐藏状态、Q/K/V、注意力分数和 logits。
+它提供索引、行指针、shape 检查和安全 reshape。上层模块几乎不直接管理裸内存，而是通过 `Tensor` 传递权重、隐藏状态、Q/K/V、
+注意力分数和 logits。
 
 基础算子负责 Transformer 中真正的数值计算：
 
@@ -182,9 +183,11 @@ bos_id/eos_id/unk_id 特殊 token
 | `BpeTokenizer` | 独立 vocab、merges、special token 文件的 GPT-2 风格 BPE |
 | `GgufTokenizer` | 从 GGUF 元数据中读取词表与合并规则 |
 
-Tokenizer 只负责文本和 token 的转换，不参与 Transformer 数值计算。模型与 tokenizer 的连接点是词表空间：Tokenizer 产生的 ID 必须能落入模型的 `[0, vocab_size)` 范围。
+Tokenizer 只负责文本和 token 的转换，不参与 Transformer 数值计算。模型与 tokenizer 的连接点是词表空间：
+Tokenizer 产生的 ID 必须能落入模型的 `[0, vocab_size)` 范围。
 
-要特别注意：加载器读取 `model.json` 中的 `TokenizerInfo`，但不会自动创建 `ITokenizer`。上层仍需根据 `type/path` 调用合适的 tokenizer 构造或工厂函数。
+要特别注意：加载器读取 `model.json` 中的 `TokenizerInfo`，但不会自动创建 `ITokenizer`。上层仍需根据
+`type/path` 调用合适的 tokenizer 构造或工厂函数。
 
 ### 3.4 MiniLlamaContext、KV Cache 与 MiniBatch
 
@@ -235,7 +238,8 @@ ForwardBatch  管理一组 token 的位置、历史，并返回最后一个 toke
 ForwardToken  对当前位置的单个 token 执行完整 Transformer 前向
 ```
 
-`ForwardBatch()` 在每一步先设置 `ctx.pos`，再调用 `ForwardToken()`，最后把该 token 追加到 `ctx.token_history`。这样 prefill 和 decode 可以复用同一条计算路径：
+`ForwardBatch()` 在每一步先设置 `ctx.pos`，再调用 `ForwardToken()`，最后把该 token 追加到
+`ctx.token_history`。这样 prefill 和 decode 可以复用同一条计算路径：
 
 ```text
 Prefill = ForwardBatch(多个 prompt token)
@@ -295,7 +299,8 @@ Sampler 不知道文本、上下文或 EOS 的含义。EOS 判断由上层生成
 - 已完成前向计算的前缀树 `prefix_cache`；
 - 采样参数与累计统计。
 
-`RadixTree` 只回答“某个 token 序列在已登记序列中有多长的公共前缀”。真正的 K/V 数据仍在当前 `MiniLlamaContext::kv_cache` 中。因此前缀树不是 KV Cache，也不能单独恢复一次推理状态。
+`RadixTree` 只回答“某个 token 序列在已登记序列中有多长的公共前缀”。真正的 K/V 数据仍在当前
+`MiniLlamaContext::kv_cache` 中。因此前缀树不是 KV Cache，也不能单独恢复一次推理状态。
 
 `Terminal` 只封装输入输出、提示符、流式 token 输出及 `/help`、`/stats` 等显示行为，使交互代码可以注入字符串流进行测试。
 
@@ -314,9 +319,11 @@ Sampler 不知道文本、上下文或 EOS 的含义。EOS 判断由上层生成
 - `Run()` 接收调用方已准备的模型和分词器；`RunChat()` 驱动多轮输入。
 - `RunChatTurn()` 完成一轮聊天的 prompt、prefill、decode、输出和状态更新。
 
-`src/main.cc` 通过 `MINI_LLAMA_BUILD_EXECUTABLE` 仅在可执行目标启用全局 `main()`。CLI 经由 `RunMain()` 加载资源；库调用仍可直接传入 `MiniLlamaModel` 和 `ITokenizer`。
+`src/main.cc` 通过 `MINI_LLAMA_BUILD_EXECUTABLE` 仅在可执行目标启用全局 `main()`。CLI 经由
+`RunMain()` 加载资源；库调用仍可直接传入 `MiniLlamaModel` 和 `ITokenizer`。
 
-`RequestContext` 记录模型加载、tokenize、prefill、decode、sample 等阶段耗时和事件。CLI 的 `generate` 使用一份请求追踪加载与推理，`run` 分开追踪资源加载和每轮用户请求；库入口复用推理实现，但不展示追踪日志。
+`RequestContext` 记录模型加载、tokenize、prefill、decode、sample 等阶段耗时和事件。CLI 的
+`generate` 使用一份请求追踪加载与推理，`run` 分开追踪资源加载和每轮用户请求；库入口复用推理实现，但不展示追踪日志。
 
 ## 4. 第一个大模块的端到端执行流程
 
@@ -600,7 +607,8 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 - GGUF 模型权重可映射到 `MiniLlamaModel`，支持上述量化 Linear；自定义
   `model.json + model.bin` 路径继续使用 F32 权重。
 - CLI 已接入生成与逐轮聊天的 `RequestContext` 阶段计时；库接口默认不展示 trace。
-- 主推理流程会更新 Context 的 `n_prefill_tokens` / `n_decode_tokens`；逐轮和会话统计分别由 RequestContext 与 ChatSession 管理。
+- 主推理流程会更新 Context 的 `n_prefill_tokens` / `n_decode_tokens`；逐轮和会话统计分别由
+  RequestContext 与 ChatSession 管理。
 - GGUF 聊天模板已由装配层自动读取并注入 `PromptBuilder`。
 - 前缀复用只复用当前单个 Context 中仍存在的 KV Cache，没有跨请求 KV 快照池。
 
@@ -632,4 +640,7 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 
 可以用下面这句话检查自己是否已经重新掌握整体结构：
 
-> Loader 把磁盘权重组装成只读 Model，Tokenizer 把 PromptBuilder 生成的文本变成 token；ForwardBatch 借助 Context 与 KV Cache 对 token 做 prefill/decode，ForwardToken 用 Tensor 和基础算子执行 Transformer 得到 logits；Sampler 选出新 token，再把它送回前向循环；ChatSession、RadixTree 和 Terminal 在外层维护多轮历史、前缀复用与流式输出。
+> Loader 把磁盘权重组装成只读 Model，Tokenizer 把 PromptBuilder 生成的文本变成 token；ForwardBatch
+> 借助 Context 与 KV Cache 对 token 做 prefill/decode，ForwardToken 用 Tensor 和基础算子执行
+> Transformer 得到 logits；Sampler 选出新 token，再把它送回前向循环；ChatSession、RadixTree 和
+> Terminal 在外层维护多轮历史、前缀复用与流式输出。

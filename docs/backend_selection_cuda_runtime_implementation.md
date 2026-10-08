@@ -4,6 +4,9 @@
 实现；当前前向继续使用 CPU 算子，上传快照不切换计算后端。GPU 推理尚未接入。
 历史 Runtime 阶段的运行结果与本次回归结果分别记录。
 
+设备 Tensor、权重上传与 CPU 前向兼容的本阶段总结见
+[CUDA Tensor 与模型权重上传](cuda_tensor_model_weights_implementation.md)。
+
 ## 文件与职责
 
 | 文件 | 职责 |
@@ -50,23 +53,26 @@ CLI 推理：ParseOptions -> ValidateInferenceBackend -> ValidateBackend
 | 接口 | 当前行为 |
 | --- | --- |
 | `CudaRuntimeBuilt()` | 检查编译宏，无需 GPU |
-| `CudaDeviceCount()` | CUDA 构建调用 cudaGetDeviceCount，无设备返回 0，其他错误抛异常；CPU 构建抛未构建异常 |
+| `CudaDeviceCount()` | CUDA 查询设备数，无设备返回 0；其他 API 错误及 CPU stub 抛异常 |
 | `CudaSetDevice(id)` | CUDA 构建校验设备编号后调用 cudaSetDevice；CPU 构建抛异常 |
-| `CudaGetDeviceInfo(id)` | 查询数量并检查范围，再读取名称、Compute Capability、显存、驱动与 Runtime 版本 |
-| `CudaFormatDeviceInfo(info)` | 输出 GPU、Compute Capability、显存字节/GiB、解码后的驱动与 Runtime 版本及原始整数编码 |
-| `CudaMallocBytes/FreeBytes/MemcpyBytes` | CPU/CUDA 构建的零长度/空释放均安全返回；非零操作检查 API 结果，CPU stub 抛未构建异常 |
+| `CudaGetDeviceInfo(id)` | 查询数量、校验范围，再读取名称、CC、显存与驱动/Runtime 版本 |
+| `CudaFormatDeviceInfo(info)` | GPU、CC、显存字节/GiB、驱动/Runtime 版本及原始编码 |
+| `CudaMallocBytes/FreeBytes/MemcpyBytes` | 零长度/空释放返回；非零检查 API，CPU stub 抛异常 |
+
+CC 表示 Compute Capability；驱动与 Runtime 版本同时显示解码值及原始整数编码。
 
 拷贝方向包括 Host→Device、Device→Host、Device→Device。非零拷贝拒绝空指针
 及未知方向。原始接口使用调用线程的当前设备。
 
-CPU stub 的统一错误为：
+CPU stub 的统一错误为以下 C++ 字符串拼接得到的单行文本：
 
-```text
-CUDA backend was not built. Reconfigure with -DMINI_LLAMA_CUDA=ON on a NVIDIA CUDA machine.
+```cpp
+"CUDA backend was not built. Reconfigure with -DMINI_LLAMA_CUDA=ON "
+"on a NVIDIA CUDA machine."
 ```
 
 CUDA API 错误包含接口名和 cudaGetErrorString 的原因。cudaErrorNoDevice 转为
-零设备，驱动与初始化失败仍报告异常。版本按 major * 1000 + minor * 10 解码，
+零设备，驱动与初始化失败仍报告异常。版本按 `major * 1000 + minor * 10` 解码，
 例如 12090 显示为 `12.9 (12090)`。
 
 ## Buffer 与 CudaTensor

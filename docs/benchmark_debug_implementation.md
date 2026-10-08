@@ -3,7 +3,7 @@
 > 当前完整模块清单见 [README](../README.md)，入口与构建状态见
 > [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
 > 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
-
+>
 > 本文记录 `feature/benchmark-design` 阶段完成时的实现状态。命令行的整体装配
 > 约定见[命令行与模块同步说明](cli_integration_status.md)。
 > 本文的 CLI 示例已同步线程配置与输出标签；CPU 并行路径见
