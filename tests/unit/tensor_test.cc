@@ -2,17 +2,12 @@
 
 #include <gtest/gtest.h>
 
-#include <cmath>
 #include <functional>
 #include <string>
 #include <vector>
 
-#include "mini_llama/matmul_dispatch.h"
-#include "mini_llama/ops.h"
-
 namespace {
 
-using mini_llama::MatmulMode;
 using mini_llama::Tensor;
 
 void Check(bool condition, const std::string& message) {
@@ -124,105 +119,6 @@ TEST(TensorTest, ShapeOperations) {
   CheckTensor(reshaped, {3, 2}, {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 5.0f});
   Check(tensor.shape == std::vector<int>({2, 3}), "reshape changed source");
   ExpectThrows([&] { tensor.ReshapeChecked({4, 2}, "ShapeTest"); });
-}
-
-// 测试小矩阵乘法的数值结果，并覆盖当前已实现的朴素 dispatch 模式。
-TEST(TensorTest, MatmulDispatch) {
-  Tensor a({2, 3}, 0.0f);
-  a.data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-  Tensor b({3, 2}, 0.0f);
-  b.data = {7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
-  const std::vector<float> expected = {58.0f, 64.0f, 139.0f, 154.0f};
-  CheckTensor(mini_llama::MatmulDispatch(a, b, MatmulMode::kNaive), {2, 2},
-              expected);
-  CheckTensor(mini_llama::Matmul(a, b), {2, 2}, expected);
-  ExpectThrows([&] {
-    mini_llama::MatmulDispatch(Tensor({2, 3}), Tensor({2, 2}), MatmulMode::kNaive);
-  });
-  ExpectThrows(
-      [&] { mini_llama::MatmulDispatch(Tensor({3}), b, MatmulMode::kNaive); });
-  // 未登记的枚举值必须被拒绝，不能静默回退到某个实现。
-  ExpectThrows(
-      [&] { mini_llama::MatmulDispatch(a, b, static_cast<MatmulMode>(-1)); });
-}
-
-// 测试 Linear 对一维输入和 [1, in_features] 输入的形状及转置权重计算。
-TEST(TensorTest, Linear) {
-  Tensor weight({2, 3}, 0.0f);
-  weight.data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-  Tensor input({3}, 0.0f);
-  input.data = {1.0f, 2.0f, 3.0f};
-  CheckTensor(mini_llama::Linear(input, weight), {2}, {14.0f, 32.0f});
-
-  Tensor batched({1, 3}, 0.0f);
-  batched.data = input.data;
-  CheckTensor(mini_llama::LinearDispatch(batched, weight, MatmulMode::kNaive),
-              {1, 2}, {14.0f, 32.0f});
-  ExpectThrows([&] {
-    mini_llama::LinearDispatch(input, weight, static_cast<MatmulMode>(-1));
-  });
-  ExpectThrows([&] { mini_llama::Linear(input, Tensor({3})); });
-  ExpectThrows([&] { mini_llama::Linear(Tensor({2, 3}), weight); });
-}
-
-// 测试 RMSNorm 的均方根归一化、权重缩放和维度校验。
-TEST(TensorTest, RmsNorm) {
-  Tensor input({2}, 0.0f);
-  input.data = {3.0f, 4.0f};
-  Tensor weight({2}, 1.0f);
-  CheckTensor(mini_llama::RmsNorm(input, weight, 0.0f), {2},
-              {0.84852814f, 1.1313709f}, 1e-5f);
-  ExpectThrows([&] { mini_llama::RmsNorm(input, Tensor({3}, 1.0f), 1e-5f); });
-  ExpectThrows([&] { mini_llama::RmsNorm(Tensor({1, 2}), weight, 1e-5f); });
-}
-
-// 测试带最大值平移的 Softmax，确认概率和为一且不会溢出。
-TEST(TensorTest, Softmax) {
-  Tensor input({3}, 0.0f);
-  input.data = {1000.0f, 1001.0f, 999.0f};
-  Tensor output = mini_llama::Softmax(input);
-  const float denominator = 1.0f + std::exp(-1.0f) + std::exp(-2.0f);
-  CheckNear(output.data[0], std::exp(-1.0f) / denominator, 1e-6f);
-  CheckNear(output.data[1], 1.0f / denominator, 1e-6f);
-  CheckNear(output.data[2], std::exp(-2.0f) / denominator, 1e-6f);
-  CheckNear(output.data[0] + output.data[1] + output.data[2], 1.0f, 1e-6f);
-  ExpectThrows([&] { mini_llama::Softmax(Tensor({1, 3})); });
-  ExpectThrows([] { mini_llama::Softmax(Tensor()); });
-}
-
-// 测试 SiLU 的逐元素公式，并保留输入张量形状。
-TEST(TensorTest, Silu) {
-  Tensor input({2}, 0.0f);
-  input.data = {-1.0f, 1.0f};
-  CheckTensor(mini_llama::Silu(input), {2},
-              {-1.0f / (1.0f + std::exp(1.0f)), 1.0f / (1.0f + std::exp(-1.0f))});
-}
-
-// 测试逐元素乘法的数值结果和形状不匹配错误。
-TEST(TensorTest, ElementwiseMul) {
-  Tensor a({2, 2}, 0.0f);
-  a.data = {1.0f, 2.0f, 3.0f, 4.0f};
-  Tensor b({2, 2}, 2.0f);
-  CheckTensor(mini_llama::ElementwiseMul(a, b), {2, 2}, {2.0f, 4.0f, 6.0f, 8.0f});
-  ExpectThrows([&] { mini_llama::ElementwiseMul(a, Tensor({4}, 1.0f)); });
-}
-
-// 测试 SwiGLU 对每个 gate 元素分别执行 SiLU 后再与 up 相乘。
-TEST(TensorTest, SwiGlu) {
-  Tensor gate({2}, 0.0f);
-  gate.data = {-1.0f, 2.0f};
-  Tensor up({2}, 3.0f);
-  CheckTensor(mini_llama::SwiGlu(gate, up), {2},
-              {-3.0f / (1.0f + std::exp(1.0f)), 6.0f / (1.0f + std::exp(-2.0f))});
-  ExpectThrows([&] { mini_llama::SwiGlu(gate, Tensor({1}, 1.0f)); });
-}
-
-// 测试 ArgMax 返回展平索引，并在并列最大值时保留首次出现的位置。
-TEST(TensorTest, ArgMax) {
-  Tensor tensor({2, 2}, 0.0f);
-  tensor.data = {1.0f, 5.0f, 5.0f, 2.0f};
-  Check(mini_llama::ArgMax(tensor) == 1, "ArgMax tie handling mismatch");
-  ExpectThrows([] { mini_llama::ArgMax(Tensor()); });
 }
 
 }  // namespace

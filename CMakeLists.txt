@@ -63,4 +63,15 @@ include(CTest)
 
 if(BUILD_TESTING)
   add_subdirectory(tests)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(NAME golden-logits
+    COMMAND ${CMAKE_COMMAND} -E env
+      "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
+      "PYTHONDONTWRITEBYTECODE=1"
+      ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/test_golden.py
+  )
+  set_tests_properties(golden-logits PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    TIMEOUT 120
+  )
 endif()

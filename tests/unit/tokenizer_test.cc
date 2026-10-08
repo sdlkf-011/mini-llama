@@ -162,6 +162,24 @@ TEST(TokenizerTest, JsonVocabTokenizer) {
   Check(tokenizer.DecodeToken(99) == "<unk>", "越界 JSON token 应解码为 UNK");
 }
 
+// 合法空 token 不产生文本，稀疏空槽和越界 ID 则仍解码为 UNK。
+TEST(TokenizerTest, JsonVocabTokenizerEmptyTokenAndMissingIds) {
+  TemporaryDirectory directory;
+  const auto vocab = directory.File("vocab.json");
+  WriteText(
+      vocab,
+      R"([{"id":3,"content":"a","special":false},{"id":4,"content":"b","special":false},{"id":127,"content":"","special":false}])");
+
+  JsonVocabTokenizer tokenizer(vocab.string());
+
+  EXPECT_EQ(tokenizer.DecodeToken(127), "");
+  EXPECT_EQ(tokenizer.Decode({3, 127, 4}), "ab");
+  EXPECT_EQ(tokenizer.DecodeToken(0), "<unk>");
+  EXPECT_EQ(tokenizer.DecodeToken(126), "<unk>");
+  EXPECT_EQ(tokenizer.DecodeToken(-1), "<unk>");
+  EXPECT_EQ(tokenizer.DecodeToken(128), "<unk>");
+}
+
 // 测试损坏或不存在的 JSON 词表会通过异常明确报告加载失败。
 TEST(TokenizerTest, InvalidJsonVocabTokenizer) {
   TemporaryDirectory directory;
