@@ -14,9 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include "mini_llama/backend.h"
 #include "mini_llama/batch.h"
 #include "mini_llama/chat.h"
 #include "mini_llama/context.h"
+#include "mini_llama/cuda_runtime.h"
 #include "mini_llama/debug.h"
 #include "mini_llama/forward.h"
 #include "mini_llama/gguf.h"
@@ -84,6 +86,7 @@ struct CommandOptions {
   SamplingParams sampling;
   std::string dump_logits_dir;
   bool verbose = false;
+  BackendConfig backend;
 };
 
 // 使用 from_chars 拒绝负号、空白、尾随字符和溢出；不限制合法 seed 的范围
@@ -106,6 +109,29 @@ int ParseIntArg(const std::string& text, const std::string& option) {
     throw std::invalid_argument(option + " must be between 0 and 1000000");
   }
   return value;
+}
+
+void ParseBackendArg(const std::string& text, BackendConfig& config) {
+  if (!ParseBackendKind(text, config.kind)) {
+    throw std::invalid_argument("invalid --backend: " + text +
+                                "; expected cpu or cuda");
+  }
+}
+
+void ParseDeviceArg(const std::string& text, BackendConfig& config) {
+  if (config.device_id_set) {
+    throw std::invalid_argument("duplicate option: --device");
+  }
+  // 复用严格整数解析，不使用 token 数选项的 1000000 上限。
+  int device_id = 0;
+  try {
+    device_id = ParseInteger<int>(text, "--device");
+  } catch (const std::invalid_argument&) {
+    throw std::invalid_argument("invalid --device: " + text +
+                                "; expected a non-negative integer GPU ID");
+  }
+  config.device_id = device_id;
+  config.device_id_set = true;
 }
 
 // 温度必须是有限的非负数；范围错误在转换为 float 前检查
@@ -131,6 +157,34 @@ bool IsInferenceCommand(const std::string& command) {
   return IsGenerationCommand(command) || command == "bench";
 }
 
+// 诊断使用统一 Runtime 接口；错误写入注入的流，保持 CLI 的非零退出约定。
+int RunCudaInfo(std::ostream& output, std::ostream& error) {
+  output << "CUDA backend built: " << (CudaRuntimeBuilt() ? "yes" : "no") << '\n';
+  try {
+    const int count = CudaDeviceCount();
+    output << "CUDA GPU count: " << count << '\n';
+    for (int device_id = 0; device_id < count; ++device_id) {
+      output << CudaFormatDeviceInfo(CudaGetDeviceInfo(device_id)) << '\n';
+    }
+    if (count == 0) {
+      output << "No CUDA devices are available.\n";
+    }
+    return 0;
+  } catch (const std::exception& exception) {
+    error << "CUDA info failed: " << exception.what() << '\n';
+    return 1;
+  }
+}
+
+// Runtime 可用不代表推理算子已经迁移；保留后续 CUDA 推理模块的接入边界
+void ValidateInferenceBackend(const BackendConfig& config) {
+  ValidateBackend(config);
+  if (config.kind == BackendKind::kCuda) {
+    throw std::runtime_error(
+        "CUDA Runtime is available, but CUDA inference is not integrated yet.");
+  }
+}
+
 // 全局帮助只列出当前已接入的命令，具体参数交给对应命令帮助说明
 void PrintGlobalUsage(const char* prog, std::ostream& out) {
   out << "Usage: " << prog << " <command> [options]\n"
@@ -140,6 +194,7 @@ void PrintGlobalUsage(const char* prog, std::ostream& out) {
       << "  bench         Benchmark prefill and token decoding\n"
       << "  inspect       Inspect model configuration and tensors\n"
       << "  inspect-gguf  Inspect GGUF metadata and tensor directory\n"
+      << "  --cuda-info   Diagnose the compiled CUDA backend and GPUs\n"
       << "\nRun \"" << prog << " <command> --help\" for details.\n";
 }
 
@@ -160,6 +215,12 @@ void PrintCommandUsage(const char* prog, const std::string& command,
   out << "Options:\n"
       << "  -m, --model <path|dir> Model binary, GGUF file, or model directory\n"
       << "  --config <path>       JSON manifest for a binary model\n";
+  out << "  --backend cpu|cuda    Compute backend (default: cpu)\n"
+      << "  --device <id>         Non-negative GPU ID (CUDA only; default: 0)\n";
+  if (command == "inspect") {
+    out << "                        Metadata only: backend/device are validated,\n"
+        << "                        but do not query GPUs or upload weights\n";
+  }
 
   if (IsInferenceCommand(command)) {
     out << "  --weights <path>      Alias for --model with binary weights\n"
@@ -198,6 +259,7 @@ void PrintCommandUsage(const char* prog, const std::string& command,
 CommandOptions ParseOptions(int argc, const char* const argv[],
                             bool allow_resource_options) {
   CommandOptions options;
+  bool backend_set = false;
   int start = 1;
   // 首参数是选项时沿用旧版调用方式，默认进入 generate；否则消费命令名
   if (argc > 1 && argv[1][0] != '-') {
@@ -222,6 +284,14 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
     return std::string(argv[index]);
   };
 
+  const auto read_backend_value = [&](int& index, const std::string& option) {
+    const std::string value = read_value(index, option);
+    if (value.empty() || value.rfind("--", 0) == 0 || value == "-h") {
+      throw std::invalid_argument("missing value for " + option);
+    }
+    return value;
+  };
+
   // 资源路径禁止重复和空值，避免多个来源覆盖后难以判断最终加载了什么
   const auto set_path = [&](std::string& path, int& index,
                             const std::string& option) {
@@ -239,6 +309,14 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
     const std::string option = argv[i];
     if (option == "-h" || option == "--help") {
       options.help = true;
+    } else if (options.command != "inspect-gguf" && option == "--backend") {
+      if (backend_set) {
+        throw std::invalid_argument("duplicate option: --backend");
+      }
+      ParseBackendArg(read_backend_value(i, option), options.backend);
+      backend_set = true;
+    } else if (options.command != "inspect-gguf" && option == "--device") {
+      ParseDeviceArg(read_backend_value(i, option), options.backend);
     } else if (allow_resource_options && i == start && !option.empty() &&
                option.front() != '-') {
       // 位置模型参数只允许紧跟命令，后续裸参数不会被误当成另一个模型
@@ -286,6 +364,10 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
   // generate 允许只做 prefill；聊天模式必须留出至少一个响应 token 的预算
   if (options.command == "run" && options.n_predict == 0 && !options.help) {
     throw std::invalid_argument("--n-predict must be positive in run mode");
+  }
+  // 所有命令都拒绝 CPU 与显式设备参数冲突；这里只检查 CPU，不查询 GPU。
+  if (options.backend.kind == BackendKind::kCpu) {
+    ValidateBackend(options.backend);
   }
   return options;
 }
@@ -719,6 +801,8 @@ int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
                 RequestContext& request, std::ostream& output) {
   const auto generated =
       GenerateTokens(loaded.model, *loaded.tokenizer, options, request, true);
+  output << "backend: " << BackendKindName(options.backend.kind) << '\n'
+         << BackendExecutionNote(options.backend) << '\n';
   output << "mini-llama.cpp\n==============\n\n"
          << "threads: " << GetThreadCount() << '\n'
          << "prompt: " << options.prompt << '\n'
@@ -745,6 +829,8 @@ int RunBench(const LoadedModel& loaded, const CommandOptions& options,
   const BenchmarkResult result =
       RunBenchmark(loaded.model, prompt, options.n_predict, options.sampling.seed,
                    options.verbose, output);
+  output << "backend: " << BackendKindName(options.backend.kind) << '\n'
+         << BackendExecutionNote(options.backend) << '\n';
   request.prefill_tokens = result.n_prompt_tokens;
   request.generated_tokens = result.n_generated_tokens;
   request.decode_tokens = result.n_decode_tokens;
@@ -942,6 +1028,10 @@ int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
   session.sampling_params = options.sampling;
   MiniLlamaContext context(&model);
   MiniSampler sampler(options.sampling);
+  if (trace_turns) {
+    output << "backend: " << BackendKindName(options.backend.kind) << '\n'
+           << BackendExecutionNote(options.backend) << '\n';
+  }
   terminal.PrintMessage(
       "mini-llama.cpp chat\nType /help for commands, /exit to quit.");
 
@@ -969,7 +1059,8 @@ int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
     }
 
     // 读取用户输入后才开始计时，将等待输入的时间排除在请求耗时之外
-    RequestContext request = StartRequest("run", "cpu", model_path);
+    RequestContext request =
+        StartRequest("run", BackendKindName(options.backend.kind), model_path);
     try {
       RunChatTurn(line, model, tokenizer, options, builder, terminal, session,
                   context, sampler, request);
@@ -1086,6 +1177,10 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
       PrintCommandUsage(argv[0], options.command, output);
       return 0;
     }
+    if (options.command != "generate" && options.command != "run") {
+      throw std::invalid_argument("Run requires generate or run mode");
+    }
+    ValidateInferenceBackend(options.backend);
     if (options.n_threads >= 0) {
       SetThreadCount(options.n_threads);
     }
@@ -1093,12 +1188,10 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
       // 此接口没有模板参数，沿用纯文本聊天，并关闭逐轮追踪输出
       return RunChat(model, tokenizer, "", options, input, output, "", false);
     }
-    if (options.command != "generate") {
-      throw std::invalid_argument("Run requires generate or run mode");
-    }
 
     // 单轮库入口仅输出生成正文，保持既有调用和单元测试的输出约定
-    RequestContext request = StartRequest("generate", "cpu", "");
+    RequestContext request =
+        StartRequest("generate", BackendKindName(options.backend.kind), "");
     output << DecodeGeneratedTokens(
                   tokenizer, GenerateTokens(model, tokenizer, options, request))
            << '\n';
@@ -1137,12 +1230,19 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
       PrintGlobalUsage(argv[0], output);
       return 0;
     }
+    if (argc == 2 && std::string(argv[1]) == "--cuda-info") {
+      return RunCudaInfo(output, error);
+    }
 
     const CommandOptions options = ParseOptions(argc, argv, true);
     if (options.help) {
       // 命令帮助同样先于路径检查，缺失模型时也可以查看有效参数
       PrintCommandUsage(argv[0], options.command, output);
       return 0;
+    }
+
+    if (IsInferenceCommand(options.command)) {
+      ValidateInferenceBackend(options.backend);
     }
 
     // 检查命令独立分发，不创建分词器、KV Cache 或生成请求
@@ -1153,13 +1253,16 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
       return RunInspectGguf(options.model_path, output);
     }
     if (options.command == "inspect") {
-      return RunInspect(ResolveModelPaths(options), output);
+      const int status = RunInspect(ResolveModelPaths(options), output);
+      output << "backend: " << BackendKindName(options.backend.kind)
+             << "\ncompute: none (metadata only; backend/device do not initialize "
+                "CUDA)\n";
+      return status;
     }
     if (options.n_threads >= 0) {
       SetThreadCount(options.n_threads);
     }
 
-    // 当前推理由 CPU 模块执行；后续后端接入时在装配层传入实际后端名称
     std::string model_hint =
         options.model_path.empty() ? options.weights_path : options.model_path;
     if (model_hint.empty()) {
@@ -1171,7 +1274,8 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
     }
 
     // 先用用户路径启动追踪，确保路径解析或模型加载失败也能报告请求状态
-    request = StartRequest(options.command, "cpu", model_hint);
+    request = StartRequest(options.command, BackendKindName(options.backend.kind),
+                           model_hint);
     trace_started = true;
     const auto stage_start = RequestClock::now();
 

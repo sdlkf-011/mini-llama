@@ -8,8 +8,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(MINI_LLAMA_CUDA "Enable the CUDA backend" OFF)
+if(MINI_LLAMA_CUDA)
+  find_package(CUDAToolkit REQUIRED)
+endif()
+
 # mini_llama 核心库
 add_library(mini_llama_core
+  src/backend.cc
+  src/cuda_runtime.cc
   src/tensor.cc
   src/ops.cc
   src/matmul_optimized.cc
@@ -38,6 +45,11 @@ add_library(mini_llama_core
   src/thread_pool.cc
 )
 
+if(MINI_LLAMA_CUDA)
+  target_compile_definitions(mini_llama_core PUBLIC MINI_LLAMA_USE_CUDA=1)
+  target_link_libraries(mini_llama_core PRIVATE CUDA::cudart)
+endif()
+
 target_include_directories(mini_llama_core
   PUBLIC
     ${PROJECT_SOURCE_DIR}/include
@@ -64,6 +76,15 @@ include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_test(
+    NAME backend-cli-smoke
+    COMMAND ${CMAKE_COMMAND} -E env
+            "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/test_backend_cli.py
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(backend-cli-smoke PROPERTIES TIMEOUT 180)
   add_test(NAME golden-logits
     COMMAND ${CMAKE_COMMAND} -E env
       "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
