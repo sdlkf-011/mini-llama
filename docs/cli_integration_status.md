@@ -21,9 +21,13 @@ CPU 调度、F32 SIMD 和测试细节见
 | `bench` | 测量预填充与逐 token 解码性能，可用 `--verbose` 输出调试信息 |
 | `inspect` | 检查 JSON 清单或 GGUF 元数据，不加载模型权重或分词器 |
 | `inspect-gguf` | 直接检查 GGUF 文件头、元数据和张量目录 |
+| `--cuda-info` | 查询 CUDA Runtime 构建状态和真实 GPU 信息，失败时返回非零 |
 
-CPU 线程配置已通过 `--threads` 接入推理命令。CUDA 和整模型重新量化尚未接入
-CLI。已有量化 Linear 可
+CPU 线程配置已通过 `--threads` 接入推理命令，后端选项和 CUDA Runtime 诊断也已接入。
+CUDA 推理算子与模型权重上传仍属于后续模块，当前 CUDA 推理请求明确报错。
+后端参数、Runtime 接口及本阶段验证结果见
+[后端选择与 CUDA Runtime 阶段实现汇总](backend_selection_cuda_runtime_implementation.md)。
+整模型重新量化尚未接入 CLI，已有 CPU 量化 Linear 可
 运行 GGUF 中的 Q8_0/Q4_0/Q4_1 权重；单张量量化与模型权重字节统计仍是库能力。
 
 ## 参数与模型选择
@@ -140,8 +144,9 @@ ctest --test-dir build --output-on-failure -j4
 python3 scripts/test_threaded_cli.py
 ```
 
-当前回归在模型加载、Tokenizer、生成、聊天、检查命令和基准测试之外，新增
+CPU 多线程阶段的回归在模型加载、Tokenizer、生成、聊天、检查命令和基准测试之外，新增
 `tests/threaded_matmul_test.cc` 的 9 项多线程测试，CMake 引用与当前文件名一致。
-本次同步后构建成功，全量 CTest **113/113 通过**；`mini-llama-tests` 前缀
-筛选结果为 **22/22 通过**。CLI 脚本验证线程配置、9 份导出 logits 和生成结果，
-输出 `PASS`。历史文档中的 82、95、104 项测试是对应阶段快照。
+该阶段构建成功，全量 CTest **113/113 通过**，`mini-llama-tests` 前缀
+筛选结果为 **22/22 通过**，这些数字与历史文档中的 82、95、104 项均为阶段快照。
+当前 Backend/CUDA Runtime 阶段的全量回归为 CPU 150 项通过、8 项跳过，
+CUDA 单 GPU 156 项通过、2 项跳过，跳过条件与详细证据见本阶段实现汇总。
