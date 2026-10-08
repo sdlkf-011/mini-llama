@@ -1,5 +1,9 @@
 # Tensor、基础算子与 Matmul Dispatch 阶段总结
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 ## 实现范围
 
 - `Tensor` 提供 F32 稠密张量，保存 `shape` 与连续 `data`，支持 1D 至 4D 便捷访问、通用多维索引、二维行指针、shape 校验和安全重塑。
@@ -22,7 +26,8 @@
 
 ## 测试内容
 
-`tests/unit/tensor_test.cc` 包含 13 个独立测试组，每个测试函数前均有注释说明测试目标，覆盖：
+`tests/unit/tensor_test.cc` 有 5 项 Tensor 测试；`tests/unit/ops_test.cc` 有 11 项
+算子测试，分别注册独立 target，覆盖：
 
 - Tensor 构造、填充、索引展开、At 访问器、RowPtr、非法 shape/索引、AssertShape 和 ReshapeChecked。
 - 2×3 与 3×2 矩阵乘法，验证当前朴素 dispatch 模式和错误维度处理。

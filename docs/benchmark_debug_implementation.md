@@ -1,5 +1,9 @@
 # 调试与基准测试阶段实现汇总
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 > 本文记录 `feature/benchmark-design` 阶段完成时的实现状态。命令行的整体装配
 > 约定见[命令行与模块同步说明](cli_integration_status.md)。
 > 本文的 CLI 示例已同步线程配置与输出标签；CPU 并行路径见
@@ -31,7 +35,7 @@ Cache 状态的文本输出，不改变普通 `generate` 和交互式 `run` 的�
 - `src/debug.cc`：调试输出与基准执行实现。
 - `src/main.cc`：`bench` 参数解析、模型装配、结果展示和请求追踪。
 - `tests/debug_test.cc`：调试模块单元测试。
-- `tests/unit/main_test.cc`：`bench` 命令集成测试。
+- `tests/main_test.cc`：`bench` 命令集成测试。
 - `CMakeLists.txt` 与 `tests/CMakeLists.txt`：生产代码和测试目标注册。
 
 ## 公共接口参考
@@ -256,7 +260,7 @@ CLI 异常处理，输出 `status=error` 的请求摘要。
 - 最大上下文长度截断。
 - verbose 模式的完整调试信息。
 
-`tests/unit/main_test.cc` 另有 1 项 CLI 集成测试，覆盖 `bench --help`、资源装配、
+`tests/main_test.cc` 另有 1 项 CLI 集成测试，覆盖 `bench --help`、资源装配、
 `--verbose` 输出流、统计结果和 `mode=bench` 请求追踪。
 
 本阶段验证命令：
@@ -271,7 +275,7 @@ ctest --test-dir build --output-on-failure
 `bench models/tiny -p hello -n 2 --seed 42` 可得到 2 个生成 token、1 次 decode
 及对应的 prefill/decode 吞吐量。
 
-加入 CPU 多线程后，当前完整回归为 113/113，`mini-llama-tests` 前缀测试为
+CPU 多线程阶段的历史完整回归为 113/113，`mini-llama-tests` 前缀测试为
 22/22。`python3 scripts/test_threaded_cli.py` 检查 1/4/自动线程配置、logits
 和生成结果一致性，以及本节示例中的输出标签；测试入口使用当前文件名
 `tests/threaded_matmul_test.cc`。完整说明见 CPU 多线程文档。
@@ -288,9 +292,10 @@ ctest --test-dir build --output-on-failure
   `RequestContext` 中。
 - `decode_ms` 覆盖逐 token 前向、采样以及 verbose 模式下的循环内输出，因此
   性能比较必须关闭 `--verbose`。
-- 当前 CPU 路径支持 `--threads`，仍没有 GPU 后端选择选项。F32 Linear 使用
-  SIMD/线程分发，Attention 按 head 并行；量化 Linear 继续使用现有标量路径，
-  因此基准结果不能概括为全部算子都已多线程或 SIMD 化。
+- CLI 已有 `--backend cpu|cuda`、`--device` 与 `--threads`；CUDA 推理仍由
+  入口明确拒绝。F32 Linear 使用 SIMD/线程分发，Attention 按 head 并行；
+  三种量化 Linear 支持 batch 与外层并行，Q8_0/Q4_0 可使用 NEON，Q4_1 点积
+  为 scalar。不能概括为全部算子都已 SIMD 化或已完成 GPU 基准。
 - `DumpKvCacheInfo()` 面向正常构造的四维 `KvCache`，不负责诊断损坏或未初始化的
   cache shape。
 

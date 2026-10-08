@@ -1,5 +1,9 @@
 # KV Cache、推理上下文与前向推理阶段实现汇总
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 > 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
 > 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
 > 当前 F32 Linear 分发与 CPU Attention 按 head 并行见
@@ -47,7 +51,9 @@ values : [n_layers, max_seq_len, n_kv_heads, head_dim]
 5. 每层继续执行 Pre-Norm SwiGLU FFN：RMSNorm → `w_gate/w_up` → `Silu(gate) * up` → `w_down` → 残差。
 6. 最终执行 RMSNorm 和 LM Head，输出形状为 `[vocab_size]` 的 logits。
 
-前向实现通过 `ForwardLinear`、`ForwardRmsNorm`、`ForwardSwiGlu`、`ForwardSoftmax` 和 `ForwardRope` 进行算子封装。当前封装调用 CPU F32 实现，后续可在不改动 Transformer 流程的情况下替换为量化或设备实现。
+前向实现通过 `ForwardLinear`、`ForwardRmsNorm`、`ForwardSwiGlu`、`ForwardSoftmax` 和 `ForwardRope` 进行算子封装。当前 CPU Linear 已按 F32/Q8_0/Q4_0/Q4_1 分发；CPU Attention 按 head 并行。
+CUDA Tensor 与权重上传属于库能力，不切换 CPU 前向；KV Cache 与 Attention
+仍在 CPU。设备侧现状见 [CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
 
 ### RoPE 与算子扩展
 
@@ -87,9 +93,9 @@ Q 和 K 应用位置旋转，V 不参与旋转。实现检查输入为二维张�
 本阶段新增以下测试文件，每个测试前均注释了测试目的：
 
 - `tests/unit/kv_cache_test.cc`：写入/读取寻址，以及形状和越界校验。
-- `tests/unit/radix_tree_test.cc`：共享前缀、最长匹配、重复插入、清空和移动语义。
-- `tests/unit/chat_test.cc`：当前仓库尚无独立 Chat API，因此覆盖聊天推理所依赖的 `MiniLlamaContext` 生命周期、KV Cache 初始化和 token 历史。
-- `tests/unit/request_context_test.cc`：请求启动、事件记录、耗时、摘要格式化、错误状态和事件顺序。
+- `tests/radix_tree_test.cc`：共享前缀、最长匹配、重复插入、清空和移动语义。
+- `tests/unit/chat_test.cc`：覆盖 PromptBuilder、终端和 Run 编排；`MiniLlamaContext` 的生命周期与 token 历史另在前向和 batch 测试中检查。
+- `tests/request_context_test.cc`：请求启动、事件记录、耗时、摘要格式化、错误状态和事件顺序。
 - `tests/unit/forward_test.cc`：单 token 前向结果、KV Cache 写入、批量与逐 token 等价性、上下文状态维护和非法输入校验。
 
 构建和测试命令：
@@ -100,8 +106,11 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-当前测试矩阵共 33 项，包含原有 Tensor/Tokenizer 测试和本阶段新增测试，全部通过。
+该阶段历史测试矩阵共 33 项，包含原有 Tensor/Tokenizer 测试和本阶段新增测试，全部通过。
 
 ## 当前边界
 
-本阶段未实现模型文件加载、完整对话编排、采样器或独立 Chat 服务接口；`chat_test.cc` 因而只验证现有推理上下文基础。前向计算目前为 CPU F32 实现，批处理仍按 token 顺序执行，后续可在既有包装层和上下文结构上继续扩展。
+模型加载、采样、完整对话编排与 CLI 当前均已接入。上下文仍持有完整窗口的 CPU
+F32 KV Cache，ForwardBatch 仍按 token 顺序计算；量化 batch Linear 不代表多序列
+并行推理。RadixTree 只记录前缀，不保存跨上下文 KV 快照。CUDA 张量与权重上传
+不选择推理后端，GPU 前向或设备驻留 decode 尚未实现。

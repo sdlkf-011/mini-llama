@@ -1,5 +1,9 @@
 # Python ↔ C++ golden logits 回归
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 依赖：CMake、当前 C++ 工具链、Python 3 和 NumPy。参考实现直接读取
 `models/tiny/model.json` 中的 float32 张量形状、字节偏移和
 `models/tiny/model.bin` 权重，不调用 C++ 算子。

@@ -18,6 +18,7 @@ endforeach()
 
 include(GoogleTest)
 
+# 每个源码注册独立 GTest 目标；可选第三参数作为 CTest 名称前缀
 function(add_unit_test test_name test_source)
   add_executable(${test_name}
     ${test_source}
@@ -38,6 +39,8 @@ endfunction()
 
 add_unit_test(mini-llama-batch-tests unit/batch_test.cc)
 add_unit_test(mini-llama-cuda-runtime-tests cuda_runtime_test.cc "cuda_runtime.")
+
+add_unit_test(mini-llama-cuda-tensor-tests cuda_tensor_test.cc "cuda_tensor.")
 add_unit_test(mini-llama-chat-tests unit/chat_test.cc)
 add_unit_test(mini-llama-debug-tests unit/debug_test.cc)
 add_unit_test(mini-llama-forward-tests unit/forward_test.cc)
@@ -52,7 +55,7 @@ add_unit_test(mini-llama-sampler-tests unit/sampler_test.cc)
 add_unit_test(mini-llama-tensor-tests unit/tensor_test.cc)
 add_unit_test(mini-llama-tokenizer-tests unit/tokenizer_test.cc)
 
-# 保留 tests 根目录的既有测试，单元测试目录按模块分别注册。
+# 保留 tests 根目录的既有测试，单元测试目录按模块分别注册
 add_unit_test(mini-llama-threaded-matmul-tests threaded_matmul_test.cc
               "mini-llama-tests.")
 add_unit_test(mini-llama-chat-integration-tests chat_test.cc

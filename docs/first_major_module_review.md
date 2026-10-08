@@ -1,5 +1,9 @@
 # 模块复习：从模型文件到文本生成
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 复习 mini-llama 第一个大模块的整体设计。这个大模块完成的是一条教学版、CPU F32 的 Llama 推理主链路：
 
 ```text
@@ -448,6 +452,7 @@ token[n] at pos n → 读取 pos 0..n，写 KV → 返回 logits
 | `/help` | 显示帮助 |
 | `/stats` | 显示会话累计统计 |
 | `/clear` | 同时清空消息、前缀、统计并重建 Context/KV Cache |
+| `/params` | 显示当前采样参数 |
 | `/exit` | 退出交互循环 |
 
 ## 5. 单个 token 在 Transformer 内部怎么执行
@@ -584,8 +589,10 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 复习时要把“已经有组件”和“已经端到端自动接线”区分开：
 
 - 当前 F32 Linear 已支持多线程与 SIMD，CPU Attention 按 head 复用
-  `ParallelFor()`，CLI 支持 `--threads`。Q8_0/Q4_0/Q4_1 Linear 仍为标量路径，
-  embedding 仍为 F32，也没有 GPU 后端。
+  `ParallelFor()`，CLI 支持 `--threads`。三种量化 Linear 已支持 batch 与外层
+  并行，Q8_0/Q4_0 可使用 NEON；Q4_1 点积为 scalar。Embedding 仍为 F32。
+- Backend/CUDA Runtime 与权重上传库接口已有实现，CLI CUDA 推理仍拒绝；
+  上传不改变 CPU 前向路径，CUDA 算子与 GPU Attention/KV Cache 未实现。
 - `MiniBatch` 内部仍逐 token 执行，不是并行 batch 推理。
 - 项目同时构建核心库、CLI 与测试，`main()` 只在可执行目标中启用。
 - Loader 不会根据 `TokenizerInfo` 自动实例化 tokenizer。

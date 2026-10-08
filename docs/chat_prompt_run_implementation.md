@@ -1,5 +1,9 @@
 # Chat Template、PromptBuilder 与 Run 模式实现总结
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 ## 阶段目标
 
 本阶段在已有 Chat、Tokenizer、GGUF Reader 和交互式 `run` 模式基础上，审查并
@@ -288,7 +292,7 @@ cmake --build build -j4
 ctest --test-dir build -R mini-llama-tests --output-on-failure
 ```
 
-当前结果：
+该阶段历史结果（不代表当前工作区重新验证）：
 
 - 构建成功。
 - `mini-llama-tests`：13/13 通过。

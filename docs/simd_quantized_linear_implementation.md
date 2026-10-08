@@ -1,5 +1,9 @@
 # SIMD 点积、量化 Linear 与 batch 支持阶段总结
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 本阶段在已有 CPU 算子上完善 F32 SIMD 点积，补充量化 NEON 点积和外层并行，
 统一量化 Linear 的 batch 输入支持，并补齐上传版本中的公开兼容接口。
 正确的已有实现继续沿用，未引入完整 SIMD GEMM 或改变 Q4_0 舍入规则。
