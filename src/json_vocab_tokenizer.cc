@@ -367,12 +367,16 @@ std::vector<int> JsonVocabTokenizer::Encode(const std::string& text) const {
 }
 
 std::string JsonVocabTokenizer::DecodeToken(int token) const {
-  // 非法 ID 和稀疏词表中的空槽统一解码为未知 token
-  if (token < 0 || static_cast<size_t>(token) >= id_to_entry_.size() ||
-      id_to_entry_[token].content.empty()) {
+  // 非法 ID 解码为未知 token
+  if (token < 0 || static_cast<size_t>(token) >= id_to_entry_.size()) {
     return "<unk>";
   }
-  return id_to_entry_[token].content;
+  // 根据 ID 标记识别空槽，合法 token 的内容可以是空字符串
+  const VocabEntry& entry = id_to_entry_[token];
+  if (entry.id < 0) {
+    return "<unk>";
+  }
+  return entry.content;
 }
 
 std::string JsonVocabTokenizer::Decode(const std::vector<int>& tokens) const {

@@ -187,6 +187,7 @@ void PrintCommandUsage(const char* prog, const std::string& command,
 
     if (command == "generate") {
       out << "  --dump-logits <dir>   Dump step logits and generation_tokens.txt\n"
+          << "                        Token-by-token prefill; steps start at 0\n"
           << "  Default model: models/tiny/model.bin\n";
     }
   }
@@ -583,6 +584,7 @@ std::string DecodeGeneratedTokens(const ITokenizer& tokenizer,
 
 // 导出采用本机 float 二进制布局，与逐步 logits 对照工具保持一致
 void DumpLogits(const Tensor& logits, const std::filesystem::path& path) {
+  static_assert(sizeof(float) == 4, "logits dumps require float32");
   std::ofstream out(path, std::ios::binary);
   out.write(reinterpret_cast<const char*>(logits.data.data()),
             static_cast<std::streamsize>(logits.data.size() * sizeof(float)));

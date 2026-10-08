@@ -66,7 +66,7 @@ class JsonVocabTokenizer : public ITokenizer {
 
  private:
   struct VocabEntry {
-    int id = 0;
+    int id = -1;  // 稀疏词表中未填充的槽位
     std::string content;
     bool special = false;
   };
