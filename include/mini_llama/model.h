@@ -59,8 +59,9 @@ struct CudaUploadedWeight {
   CudaDeviceBuffer buffer;  // 权重数据的设备存储，独占显存所有权
 };
 
-// 模型的 CUDA 权重快照与统计信息。上传统计独立记录，运行统计由推理调用方累计。
-// 当前 CPU 前向不更新运行字段；字段预留不表示设备 Attention/KV Cache 已实现。
+// 模型的 CUDA 权重快照与统计信息。上传统计独立记录，运行统计由推理调用方累计
+// 默认 CPU 前向不更新运行字段；显式 CUDA Linear 路径记录实际调用与边界拷贝
+// 设备 Attention/KV Cache 尚未实现，CPU Attention fallback 单独计数
 struct CudaModelWeights {
   int device_id = 0;                 // 权重所在的 CUDA 设备编号
   size_t uploaded_weight_count = 0;  // 已上传的权重数量，包含稠密与线性权重
