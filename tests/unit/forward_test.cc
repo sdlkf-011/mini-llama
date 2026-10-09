@@ -287,13 +287,13 @@ TEST_P(ExtendedForwardTest, MatchesSequentialPrefillDecodeAndKvCache) {
   EXPECT_EQ(batch_ctx.token_history, sequential_ctx.token_history);
 }
 
-// 上传接口只管理权重；快照存在时仍使用 CPU 前向，并保留设备运行统计。
-TEST_P(ExtendedForwardTest, CudaSnapshotDoesNotSelectInferenceBackend) {
+// 空快照没有可命中的设备权重，继续使用 CPU 前向并保留运行统计。
+TEST_P(ExtendedForwardTest, EmptyCudaSnapshotPreservesCpuForwardAndStats) {
   MiniLlamaModel cpu_model = MakeExtendedTestModel(GetParam());
   MiniLlamaModel model_with_snapshot = cpu_model;
   model_with_snapshot.cuda_weights =
       std::make_shared<mini_llama::CudaModelWeights>();
-  // 手工快照只验证后端选择契约，不执行实际上传；非零哨兵验证统计未被清零。
+  // 手工空快照不执行实际上传；非零哨兵验证统计未被清零。
   model_with_snapshot.cuda_weights->linear_calls = 7;
   const auto snapshot = model_with_snapshot.cuda_weights;
   MiniLlamaContext cpu_ctx(&cpu_model);
@@ -316,8 +316,8 @@ TEST_P(ExtendedForwardTest, CudaSnapshotDoesNotSelectInferenceBackend) {
   EXPECT_EQ(mini_llama::ModelCudaDeviceToHostCopies(model_with_snapshot), 0u);
 }
 
-// 真实 GPU 上校验上传快照的字节与统计，上传后仍执行相同的 CPU 前向。
-TEST_P(ExtendedForwardTest, UploadSnapshotPreservesWeightsAndCpuForward) {
+// 上传后保持数值一致；F32 命中常驻 CUDA 权重，Q8_0 继续使用 CPU Linear。
+TEST_P(ExtendedForwardTest, UploadSnapshotPreservesWeightsAndForwardResults) {
   if (!mini_llama::CudaRuntimeBuilt()) {
     GTEST_SKIP() << "CUDA was not built; model upload was not executed";
   }
@@ -356,7 +356,18 @@ TEST_P(ExtendedForwardTest, UploadSnapshotPreservesWeightsAndCpuForward) {
   MiniLlamaContext after_ctx(&model);
   ExpectTensorNear(ForwardBatch(after_ctx, model, prefill), expected);
   ExpectTensorNear(after_ctx.kv_cache.keys, before_ctx.kv_cache.keys);
-  EXPECT_EQ(mini_llama::ModelCudaLinearCalls(model), 0u);
+  const size_t expected_cuda_calls =
+      GetParam() ? 0
+                 : static_cast<size_t>(prefill.num_tokens()) *
+                       (7 * model.config.n_layers + 1);
+  EXPECT_EQ(mini_llama::ModelCudaLinearCalls(model), expected_cuda_calls);
+  EXPECT_EQ(mini_llama::ModelCudaHostToDeviceCopies(model), expected_cuda_calls);
+  EXPECT_EQ(mini_llama::ModelCudaDeviceToHostCopies(model), expected_cuda_calls);
+  EXPECT_EQ(mini_llama::ModelCudaAttentionCalls(model), 0u);
+  EXPECT_EQ(mini_llama::ModelCudaAttentionCpuFallbacks(model),
+            GetParam()
+                ? 0u
+                : static_cast<size_t>(prefill.num_tokens()) * model.config.n_layers);
   const auto snapshot = model.cuda_weights;
   model.lm_head.shape[0] += 1;
   EXPECT_THROW(mini_llama::UploadModelWeightsToCuda(model), std::runtime_error);

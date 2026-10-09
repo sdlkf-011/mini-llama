@@ -41,6 +41,13 @@ add_unit_test(mini-llama-batch-tests unit/batch_test.cc)
 add_unit_test(mini-llama-cuda-runtime-tests cuda_runtime_test.cc "cuda_runtime.")
 
 add_unit_test(mini-llama-cuda-tensor-tests cuda_tensor_test.cc "cuda_tensor.")
+add_unit_test(mini-llama-cuda-matmul-tests cuda_matmul_test.cc)
+add_unit_test(mini-llama-cuda-forward-linear-tests cuda_forward_linear_test.cc
+              "cuda_forward_linear.")
+# 与文档中的直接运行路径一致；其余既有测试仍保留在 tests/
+set_target_properties(mini-llama-cuda-matmul-tests
+  mini-llama-cuda-forward-linear-tests PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
 add_unit_test(mini-llama-chat-tests unit/chat_test.cc)
 add_unit_test(mini-llama-debug-tests unit/debug_test.cc)
 add_unit_test(mini-llama-forward-tests unit/forward_test.cc)

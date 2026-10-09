@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "mini_llama/cuda_matmul.h"
 #include "mini_llama/ops.h"
 #include "mini_llama/thread_pool.h"
 
@@ -141,11 +142,45 @@ static Tensor AddOptionalBias(const Tensor& x, const Tensor& bias,
   return y;
 }
 
-// 复用现有算子入口，按 F32/Q8_0/Q4_0/Q4_1 分发；量化 Linear 不展开权重
+// 按上传时的名称和类型借用快照中的线性权重，不取得显存所有权
+const CudaUploadedWeight* FindCudaWeight(const MiniLlamaModel& model,
+                                         const std::string& name, QuantType type) {
+  if (!model.cuda_weights) return nullptr;
+  for (const auto& weight : model.cuda_weights->weights) {
+    if (weight.linear && weight.name == name && weight.type == type) {
+      return &weight;
+    }
+  }
+  return nullptr;
+}
+
+int CudaDeviceId(const MiniLlamaModel& model) {
+  return model.cuda_weights->device_id;
+}
+
+// 命中常驻 F32 权重时执行 CUDA Linear；未命中及量化权重复用 CPU Linear
 static Tensor ForwardLinear(const MiniLlamaModel& model, const std::string& name,
                             const Tensor& x, const QuantizedTensor& weight) {
-  (void)model;
-  (void)name;
+  const CudaUploadedWeight* cuda_weight = FindCudaWeight(model, name, weight.type);
+  if (cuda_weight != nullptr && weight.type == QuantType::kF32) {
+    if (cuda_weight->shape != weight.shape) {
+      throw std::runtime_error("ForwardLinear: CUDA weight shape mismatch: " + name);
+    }
+    auto& stats = *model.cuda_weights;
+
+    // 当前 Norm/Attention/FFN 辅助算子只有 CPU 实现，在边界上传/下载
+    // 上传快照中的权重始终借用，不在 Decode 中重新上传
+    CudaTensor device_x = CudaTensorFromHost(x, CudaDeviceId(model));
+    ++stats.host_to_device_copies;
+    stats.host_to_device_bytes += device_x.bytes();
+    CudaTensor y = CudaLinearDeviceInput(device_x, cuda_weight->buffer.data(),
+                                         cuda_weight->shape, CudaDeviceId(model));
+    ++stats.linear_calls;
+    Tensor result = y.Download();
+    ++stats.device_to_host_copies;
+    stats.device_to_host_bytes += y.bytes();
+    return result;
+  }
   return Linear(x, weight);
 }
 
@@ -283,6 +318,7 @@ static Tensor ForwardLayer(MiniLlamaContext& ctx, const MiniLlamaModel& model,
   Tensor h = ForwardRmsNorm(model, layer_prefix + "attention_norm", x,
                             lw.attention_norm, c.rms_norm_eps);
   Tensor q_flat, k_flat, v_flat;
+  const size_t linear_calls_before_qkv = ModelCudaLinearCalls(model);
   ForwardQkvProjection(model, layer_prefix, h, lw, q_flat, k_flat, v_flat);
   Tensor q = q_flat.ReshapeChecked({n_heads, head_dim}, "forward_layer q");
   Tensor k = k_flat.ReshapeChecked({n_kv_heads, head_dim}, "forward_layer k");
@@ -290,6 +326,11 @@ static Tensor ForwardLayer(MiniLlamaContext& ctx, const MiniLlamaModel& model,
   ForwardRope(model, q, k, pos, c.rope_theta, c.rope_type);
   Tensor attn_out = AttentionForward(model, q, k, v, pos, layer, ctx.kv_cache,
                                      n_heads, n_kv_heads, head_dim);
+
+  // Q/K/V 实际执行过 CUDA 投影时，后续 CPU Attention 才计作设备链路回退
+  if (model.cuda_weights && ModelCudaLinearCalls(model) > linear_calls_before_qkv) {
+    ++model.cuda_weights->attention_cpu_fallbacks;
+  }
   // 拼接查询头输出，执行 O 投影并加回本层输入，形成第一次残差
   Tensor attn_out_flat =
       attn_out.ReshapeChecked({1, n_heads * head_dim}, "forward_layer attn_out");
@@ -322,8 +363,7 @@ static Tensor ComputeLogits(const Tensor& x, const MiniLlamaModel& model,
 // 位置推进和 token_history 维护交由 ForwardBatch 或直接调用方负责
 Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int token) {
   ValidateForwardInputs(ctx, model, token);
-  // UploadModelWeightsToCuda 仅管理设备权重，不选择前向后端
-  // 现有前向继续使用 CPU 算子；显式 CUDA 请求由 CLI 后端校验拒绝
+  // 不改变已有调用接口；各 Linear 按名称和类型查找常驻 F32 权重
   const ModelConfig& c = model.config;
   Tensor x = EmbedToken(model, token);
   for (int layer = 0; layer < c.n_layers; ++layer) {
