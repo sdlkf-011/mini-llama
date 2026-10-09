@@ -82,7 +82,7 @@ void ValidateBackend(const BackendConfig& config) {
   throw std::runtime_error("unknown backend");
 }
 
-// 仅说明当前执行路径，不查询环境；Runtime 可用不代表 CUDA 推理已接入
+// 仅说明 CLI 执行路径，不查询环境；独立 CUDA 算子可用不代表 CLI 推理已接入
 std::string BackendExecutionNote(const BackendConfig& config) {
   if (config.kind == BackendKind::kCpu) {
     return "compute: cpu";

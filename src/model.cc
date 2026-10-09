@@ -139,6 +139,8 @@ void AppendWeight(CudaModelWeights& storage, CudaUploadedWeight uploaded,
 // 校验 embedding/norm/bias 的 F32 存储，标记为非 Linear 后复用上传流程
 void UploadDenseWeight(CudaModelWeights& storage, const Tensor& weight,
                        const std::string& name, const std::vector<int>& expected) {
+  // 空 Tensor 表示未提供的普通 F32 权重（典型情况是可选 bias）
+  if (weight.data.empty()) return;
   weight.AssertShape(expected, name.c_str());
   const size_t numel = WeightNumel(weight.shape, name);
   if (weight.data.size() != numel) {
@@ -272,7 +274,7 @@ size_t ModelWeightBytesF32(const MiniLlamaModel& model) {
   return bytes;
 }
 
-// 构造新的设备权重快照，保留 CPU 权重且不切换前向后端
+// 构造设备权重快照并保留 CPU 权重；ForwardToken 可借用其中命中的 F32 Linear
 // 只有所有上传完成才替换模型引用，任一异常保留原快照
 void UploadModelWeightsToCuda(MiniLlamaModel& model, int device_id) {
   if (!CudaRuntimeBuilt()) {
@@ -290,8 +292,9 @@ void UploadModelWeightsToCuda(MiniLlamaModel& model, int device_id) {
         }
       });
 
-  // Buffer 操作选择权重所属设备
+  // 明确选择目标设备；各 Buffer 仍记录自己的设备并在操作时进行保护
   CudaGetDeviceInfo(device_id);
+  CudaSetDevice(device_id);
   auto storage = std::make_shared<CudaModelWeights>();
   storage->device_id = device_id;
   const auto& c = model.config;
@@ -305,12 +308,9 @@ void UploadModelWeightsToCuda(MiniLlamaModel& model, int device_id) {
     UploadDenseWeight(*storage, layer.attention_norm, prefix + "attention_norm",
                       {c.dim});
     UploadDenseWeight(*storage, layer.ffn_norm, prefix + "ffn_norm", {c.dim});
-    if (!layer.bq.data.empty())
-      UploadDenseWeight(*storage, layer.bq, prefix + "bq", {c.dim});
-    if (!layer.bk.data.empty())
-      UploadDenseWeight(*storage, layer.bk, prefix + "bk", {kv_dim});
-    if (!layer.bv.data.empty())
-      UploadDenseWeight(*storage, layer.bv, prefix + "bv", {kv_dim});
+    UploadDenseWeight(*storage, layer.bq, prefix + "bq", {c.dim});
+    UploadDenseWeight(*storage, layer.bk, prefix + "bk", {kv_dim});
+    UploadDenseWeight(*storage, layer.bv, prefix + "bv", {kv_dim});
   }
   VisitLinearWeights(model, [&](const QuantizedTensor& weight,
                                 const std::string& name, const std::vector<int>&) {

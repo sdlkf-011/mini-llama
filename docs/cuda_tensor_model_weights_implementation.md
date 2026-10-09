@@ -5,8 +5,13 @@
 统计接口与整模型重新量化，并保持现有 CPU 推理路径和 CLI 行为。
 本文同时记录随后完成的阶段文档同步与 Markdown 警告修复。
 
-阶段结果是可验证的设备存储与模型上传能力。CUDA 算子、GPU Attention、
-GPU KV Cache 和设备驻留 decode 仍属于后续实现。
+本文是该提交阶段的历史记录，下面的“当前”指该阶段。此后的 cuBLAS F32
+混合前向和独立 CUDA Ops/Quant 已加入工作区；当前接入状态见
+[README](../README.md)、[F32 Linear](cublas_f32_linear_implementation.md) 和
+[Ops/Quant 验证](cuda_inference_validation_20261009.md)，不应用历史描述覆盖这些实现。
+
+该阶段结果是可验证的设备存储与模型上传能力。当时 CUDA 算子、GPU Attention、
+GPU KV Cache 和设备驻留 decode 属于后续实现；完整设备前向目前仍未接入。
 后端参数与 Runtime 的完整约定见
 [后端与 CUDA Runtime 说明](backend_selection_cuda_runtime_implementation.md)。
 

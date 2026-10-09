@@ -4,9 +4,12 @@
 `CudaDeviceBuffer`、设备选择、模型上传快照与运行统计。CPU 构建有明确的异常
 stub，不依赖 CUDA Toolkit。CUDA 构建链接 `CUDA::cudart` 和 `CUDA::cublas`。
 
-**当前仅完成 CUDA Linear 与 CPU 辅助算子混合的 Forward。** 本仓库没有设备
-Attention、RMSNorm、RoPE、SwiGLU、残差加法或 CUDA KV Cache。本模块遵循
-不扩展 Attention 的范围限制，没有实现这些依赖，也没有声称中间激活全程在 GPU。
+**模型前向仍是 CUDA F32 Linear 与 CPU 辅助算子的混合路径。** 当前工作区另有
+独立 `cuda_ops` 的 RMSNorm、RoPE、SiLU、逐元素加乘，以及 `cuda_quant` 的
+Q8_0/Q4_0/Q4_1 Linear；它们尚未接入模型前向。设备 Attention、CUDA KV Cache
+和完整设备驻留 decode 未实现。本模块不扩展 Attention，也不声称中间激活全程在 GPU。
+新增算子的当前验证结果见[本阶段记录](cuda_inference_validation_20261009.md)，
+本文下方的数值与时间保留为 F32 模块当时的回归快照。
 
 ## 修改文件
 

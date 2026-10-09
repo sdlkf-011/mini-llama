@@ -12,7 +12,7 @@
 
 namespace mini_llama {
 
-// RoPE 的维度配对方式：Normal 用于默认 Llama 路径，NeoX 已用于 Qwen2。
+// RoPE 的维度配对方式：Normal 用于默认 Llama 路径，NeoX 已用于 Qwen2
 enum class RopeType {
   kNormal,  // 相邻维度成对旋转
   kNeoX,    // 前后半区的对应维度成对旋转
@@ -60,7 +60,7 @@ struct CudaUploadedWeight {
 };
 
 // 模型的 CUDA 权重快照与统计信息。上传统计独立记录，运行统计由推理调用方累计
-// 默认 CPU 前向不更新运行字段；显式 CUDA Linear 路径记录实际调用与边界拷贝
+// 无快照或未命中的 CPU Linear 不更新计数；命中 F32 权重时记录 CUDA 调用与拷贝
 // 设备 Attention/KV Cache 尚未实现，CPU Attention fallback 单独计数
 struct CudaModelWeights {
   int device_id = 0;                 // 权重所在的 CUDA 设备编号
@@ -88,7 +88,7 @@ struct MiniLlamaModel {
   std::vector<LayerWeights> layers;  // [n_layers]，各 Transformer 层权重
   Tensor final_norm;                 // [dim] F32，最终 RMSNorm 缩放权重
   QuantizedTensor lm_head;           // [vocab_size, dim]，词表输出投影权重
-  // 模型副本共享设备快照，但该引用不选择计算后端；修改 CPU 权重后需重新上传
+  // 模型副本共享快照；ForwardToken 可借用命中的 F32 权重，修改 CPU 权重后需重新上传
   std::shared_ptr<CudaModelWeights> cuda_weights;
 };
 
@@ -100,13 +100,13 @@ size_t ModelWeightBytesF32(const MiniLlamaModel& model);
 
 // 当前支持 F32/Q8_0 Linear 权重；Embedding、Norm 和可选 Bias 上传为 F32
 // 保留 CPU 权重；全部上传成功后替换快照，失败保留原设备权重
-// 此接口只管理设备权重，不改变当前前向计算的后端
+// 此接口准备权重快照；当前 ForwardToken 对命中快照的 F32 Linear 使用 CUDA
 void UploadModelWeightsToCuda(MiniLlamaModel& model, int device_id = 0);
 
 // 解除当前模型的快照引用；其他模型副本持有同一快照时，显存继续保留
 void ClearModelCudaWeights(MiniLlamaModel& model);
 
-// 仅判断快照引用非空，不代表权重完整、设备可用或 CUDA 前向已接入
+// 仅判断快照引用非空，不代表权重完整、设备可用或完整设备前向已接入
 bool ModelHasCudaWeights(const MiniLlamaModel& model);
 
 // 读取全部已上传权重数量，包含 embedding/norm/bias；无快照时返回零
@@ -135,19 +135,19 @@ void ResetModelCudaRuntimeStats(MiniLlamaModel& model);
 // 读取已记录的 CUDA Linear 调用次数；以下运行统计接口无快照时均返回零
 size_t ModelCudaLinearCalls(const MiniLlamaModel& model);
 
-// 读取已记录的 CUDA 激活与辅助算子调用次数
+// 读取 CUDA 激活与辅助算子计数；独立 cuda_ops 尚未接入前向，当前前向不更新此字段
 size_t ModelCudaActivationCalls(const MiniLlamaModel& model);
 
-// 读取已记录的设备 Attention 调用次数
+// 读取设备 Attention 计数；当前前向使用 CPU Attention，不更新此字段
 size_t ModelCudaAttentionCalls(const MiniLlamaModel& model);
 
 // 读取设备推理中的 CPU Attention 回退次数，普通 CPU 前向不计作回退
 size_t ModelCudaAttentionCpuFallbacks(const MiniLlamaModel& model);
 
-// 读取已记录的设备 KV Cache 写入字节数
+// 读取设备 KV Cache 写入计数；当前前向只有 CPU KV Cache，不更新此字段
 size_t ModelCudaKvCacheWriteBytes(const MiniLlamaModel& model);
 
-// 读取已记录的设备 KV Cache 读取字节数
+// 读取设备 KV Cache 读取计数；当前前向只有 CPU KV Cache，不更新此字段
 size_t ModelCudaKvCacheReadBytes(const MiniLlamaModel& model);
 
 // 读取推理阶段主机到设备的拷贝次数，不计权重上传
