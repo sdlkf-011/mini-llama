@@ -8,7 +8,7 @@ stub，不依赖 CUDA Toolkit。CUDA 构建链接 `CUDA::cudart` 和 `CUDA::cubl
 独立 `cuda_ops` 的 RMSNorm、RoPE、SiLU、逐元素加乘，以及 `cuda_quant` 的
 Q8_0/Q4_0/Q4_1 Linear；它们尚未接入模型前向。设备 Attention、CUDA KV Cache
 和完整设备驻留 decode 未实现。本模块不扩展 Attention，也不声称中间激活全程在 GPU。
-新增算子的当前验证结果见[本阶段记录](cuda_inference_validation_20261009.md)，
+新增算子的当前验证结果见[本阶段记录](cuda_ops_quant_implementation.md)，
 本文下方的数值与时间保留为 F32 模块当时的回归快照。
 
 ## 修改文件
@@ -143,7 +143,7 @@ ctest --test-dir build-cuda \
 ./build-cuda/mini-llama-cuda-forward-linear-tests
 ```
 
-2026-10-09 在保留 Model、Context 回退，恢复 Forward/Batch 原始调用框架后，
+该阶段在保留 Model、Context 回退，恢复 Forward/Batch 原始调用框架后，
 通过内部 F32 权重查找分流重新构建验证。环境为 NVIDIA GeForce RTX 4060
 GPU、CUDA Runtime 12.9、cuBLAS
 12.9。沙箱不允许访问 GPU，真实 GPU 测试在沙箱外执行。原临时 SDK 已

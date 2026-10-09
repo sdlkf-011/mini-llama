@@ -5,8 +5,9 @@ Matmul/Linear 和独立 Ops/Quant Kernel 已有实现。库前向对命中快照
 Linear 使用 CUDA，其余路径仍在 CPU；CLI CUDA 推理和完整设备前向尚未接入。
 历史阶段与最近一次实际回归分别记录，独立算子与模型接入不混作同一状态。
 
-设备 Tensor、权重上传与 CPU 前向兼容的本阶段总结见
-[CUDA Tensor 与模型权重上传](cuda_tensor_model_weights_implementation.md)。
+此前设备 Tensor、模型上传阶段见
+[历史阶段总结](cuda_tensor_model_weights_implementation.md)；当前 Ops/Quant 与
+上传维护阶段见[本阶段实现总结](cuda_ops_quant_implementation.md)。
 
 ## 文件与职责
 
@@ -178,15 +179,15 @@ clangd --check=src/cuda_ops.cc
 `--compile-commands-dir=/path/to/mini-llama/build-cuda`，直接读取构建目录中的
 数据库。这里需要换成实际绝对路径；无需在项目根目录添加配置或数据库文件。
 
-最近一次实际全量回归为 2026-10-09：CPU 注册 189 项，161 项通过、28 项跳过；
+最近一次实际全量回归结果：CPU 注册 189 项，161 项通过、28 项跳过；
 CUDA 单 GPU 注册 189 项，182 项通过、7 项跳过，失败均为 0。
 Ops/Quant 专项匹配 8 项：CPU 3 项通过、5 项 GPU 用例跳过；GPU 5 项通过、
 3 项 CPU Stub 跳过。Q8_0/Q4_0 已验证向量、batch、尾块、bias、设备指针与输入。
 Q4_1 GPU 计算尚未专项验证。原始日志见
-[本阶段验证记录](cuda_inference_validation_20261009.md)。
+[本阶段验证记录](cuda_ops_quant_implementation.md)。
 这些通过结果包括 F32 混合前向和独立算子，未证明完整设备前向或 CLI CUDA 推理。
 
-历史 2026-10-08 Runtime/Tensor 阶段回归：CPU 全量 169 项中 157 项执行通过、12 项跳过；
+历史 Runtime/Tensor 阶段回归：CPU 全量 169 项中 157 项执行通过、12 项跳过；
 CUDA 单 GPU 全量 169 项中 166 项执行通过、3 项跳过，失败均为 0。
 Runtime 专项共 13 项：CPU 5 项通过、8 项跳过，CUDA 单 GPU 11 项通过、2 项跳过。
 CUDA Tensor 专项共 5 项：CPU 3 项通过、2 项跳过，CUDA 单 GPU 4 项通过、1 项跳过。

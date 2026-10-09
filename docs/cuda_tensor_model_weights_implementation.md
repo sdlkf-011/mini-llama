@@ -1,4 +1,4 @@
-# CUDA Tensor、模型权重上传与 CPU 前向兼容阶段总结
+# CUDA Tensor、模型权重上传与 CPU 前向兼容阶段总结（历史阶段）
 
 本阶段以提交 `385cb8a`（`CudaDeviceBuffer 与 CudaTensor`）为实现基线，
 在已有 Backend/CUDA Runtime 基础上补充设备 Tensor、模型权重上传快照、
@@ -8,7 +8,12 @@
 本文是该提交阶段的历史记录，下面的“当前”指该阶段。此后的 cuBLAS F32
 混合前向和独立 CUDA Ops/Quant 已加入工作区；当前接入状态见
 [README](../README.md)、[F32 Linear](cublas_f32_linear_implementation.md) 和
-[Ops/Quant 验证](cuda_inference_validation_20261009.md)，不应用历史描述覆盖这些实现。
+[Ops/Quant 验证](cuda_ops_quant_implementation.md)，不应用历史描述覆盖这些实现。
+
+当前 `15643de`（`CUDA Kernels: Act, Quant, Upload`）阶段的完整总结见
+[CUDA 基础算子、量化 Linear 与上传调整](cuda_ops_quant_implementation.md)。
+该提交新增的 Ops/Quant Kernel 与已有上传入口的设备选择、空稠密权重处理、
+共享所有权回归在那里记录；本文的 CudaTensor、快照和整模型量化属于此前实现。
 
 该阶段结果是可验证的设备存储与模型上传能力。当时 CUDA 算子、GPU Attention、
 GPU KV Cache 和设备驻留 decode 属于后续实现；完整设备前向目前仍未接入。
@@ -203,7 +208,7 @@ ctest --test-dir build-cuda \
 
 ### 回归结果
 
-以下为本阶段已完成的 2026-10-08 回归记录；本次文档整理未重复运行推理测试。
+以下为该历史阶段已完成的回归记录；本次文档整理未重复运行推理测试。
 
 | 配置 | 注册 | 执行通过 | 跳过 | 失败 |
 | --- | ---: | ---: | ---: | ---: |

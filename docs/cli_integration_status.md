@@ -146,13 +146,13 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 
 ## 回归验证
 
-最近一次实际全量回归为 2026-10-09，CPU 161 项通过、28 项跳过，CUDA 单 GPU
+最近一次实际全量回归中，CPU 161 项通过、28 项跳过，CUDA 单 GPU
 182 项通过、7 项跳过；均注册 189 项，失败为 0。
 独立 Ops/Quant 专项匹配 8 项：CPU 3 项通过、5 项跳过，GPU 5 项通过、
-3 项 CPU Stub 跳过。原始日志见[本阶段验证记录](cuda_inference_validation_20261009.md)。
+3 项 CPU Stub 跳过。原始日志见[本阶段验证记录](cuda_ops_quant_implementation.md)。
 完整设备前向和 CUDA CLI benchmark 仍属于后续模块，未计入这些通过结果。
 
-以下为较早的 CUDA Tensor 阶段记录，保留日期和当时的接入范围，不能作为当前总数。
+以下为较早的 CUDA Tensor 阶段记录，保留当时的接入范围，不能作为当前总数。
 
 本阶段接口、所有权与测试覆盖见
 [CUDA Tensor 与模型权重上传阶段总结](cuda_tensor_model_weights_implementation.md)。
@@ -161,7 +161,7 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 与 CUDA Tensor 测试。Runtime 的零长度操作、设备信息格式、设备恢复及 Reset
 失败状态保持已与既有测试约定对齐；CUDA Tensor 移动后源对象恢复为空。
 
-2026-10-08 对当时源码重新配置、构建并运行全量 CTest：
+设备存储阶段对当时源码重新配置、构建并运行全量 CTest：
 
 | 配置 | 注册 | 执行通过 | 跳过 | 失败 |
 | --- | ---: | ---: | ---: | ---: |
@@ -176,8 +176,7 @@ logits 不变；这不是 GPU 前向验证。
 多线程 CLI 专项也已通过：线程配置 1/4/0 的 9 份 logits、生成 ID 与 bench
 输出一致。19 份 Markdown 本地链接检查和 `git diff --check` 通过。
 
-验证构建目录分别为 `/tmp/mini-llama-sync-audit-20261008` 与
-`/tmp/mini-llama-sync-cuda-20261008`，复用现有 googletest 源码。CUDA 使用
+历史验证分别使用独立的 CPU/CUDA 构建目录，复用现有 googletest 源码。CUDA 使用
 `-DCUDAToolkit_ROOT=/tmp/mini-llama-cuda-sdk`，SDK 版本为 12.9，设备为
 NVIDIA GeForce RTX 4060 Laptop GPU。沙箱内 CUDA 查询失败会导致 GPU 用例
 跳过；表中 CUDA 结果来自允许访问 GPU 的沙箱外运行。
