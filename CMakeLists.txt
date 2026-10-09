@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# 当前 CUDA 模块只使用 Runtime API，CPU 构建无需 CUDA Toolkit
 option(MINI_LLAMA_CUDA "Enable the CUDA backend" OFF)
 if(MINI_LLAMA_CUDA)
   find_package(CUDAToolkit REQUIRED)
@@ -17,6 +18,7 @@ endif()
 add_library(mini_llama_core
   src/backend.cc
   src/cuda_runtime.cc
+  src/cuda_tensor.cc
   src/tensor.cc
   src/ops.cc
   src/matmul_optimized.cc

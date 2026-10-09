@@ -1,5 +1,9 @@
-# 分支汇总
+# GGUF Loader 实现汇总
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+>
 > 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
 > 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
 
@@ -19,8 +23,8 @@ GGUF 文件
                   Context → Forward → Sampler
 ```
 
-目标是复用现有 `Tensor` 和前向实现完成真实 GGUF 模型加载，不在本阶段引入新的
-量化张量类型或把具体模型的层数、维度、词表大小写死。
+目标是复用现有张量和前向实现完成真实 GGUF 模型加载，使用 `QuantizedTensor`
+保存 Linear 并保留量化块；不把具体模型的层数、维度或词表大小写死。
 
 ## 主要改动
 
@@ -37,7 +41,7 @@ MiniLlamaModel LoadGgufModel(const std::string& gguf_path);
 - 成功时返回完整模型，`loaded == true` 且 `load_error` 为空。
 - 失败时不向调用方传播内部异常，返回 `loaded == false` 并填写
   `load_error`。
-- 加载后的权重统一使用当前 CPU 前向路径接受的 F32 `Tensor`。
+- Embedding、norm、bias 使用 F32 `Tensor`；Linear 使用 F32 或保留量化块的 `QuantizedTensor`。
 
 新增 `src/gguf_loader.cc`，并将其加入 `mini_llama_core` 构建目标。
 
@@ -106,7 +110,7 @@ Tensor [out_features, in_features]
 
 ### 权重解码
 
-当前支持以下 GGML 类型，并统一展开到 F32：
+当前支持以下 GGML 类型。稠密张量展开为 F32；Linear 的 F32/F16 转为 F32，三种量化格式保留块数据：
 
 | 类型 | 块布局 | 解码方式 |
 | --- | --- | --- |
@@ -117,12 +121,13 @@ Tensor [out_features, in_features]
 | `Q4_1` | 32 元素/20 字节 | `F16 scale + F16 min + 16 × packed uint4` |
 
 解码前会使用 `GgufTensorDataSize()` 计算理论字节数，并要求实际读取结果精确
-匹配。量化张量的元素数必须是 32 的整数倍。F16 转换覆盖零、次正规数、普通
-数以及 Inf/NaN，整数读取显式处理小端序和未对齐访问。
+匹配。当前 GGUF 量化 Linear 要求每行输入维度是 32 的整数倍。F16 转换覆盖
+零、次正规数、普通数以及 Inf/NaN，整数读取显式处理小端序和未对齐访问。
 
-本阶段选择加载时反量化，是为了直接复用现有 F32 `Tensor`、`Linear()` 和
-`ForwardBatch()`。这会增加模型加载后的内存占用，保留量化权重并在算子层分发
-属于后续优化范围。
+`DecodeDenseTensor()` 为 embedding/norm/bias 反量化；`DecodeLinearWeight()`
+为投影权重保留 Q8_0/Q4_0/Q4_1 块。`Linear(x, QuantizedTensor)` 按类型分发并
+即时解码点积，不创建完整临时 F32 权重。Q8_0/Q4_0 可用 NEON，三种量化 Linear
+均支持 batch 和外层线程调度；更多 SIMD GEMM 优化仍未实现。
 
 ## 模型装配流程
 
@@ -175,7 +180,7 @@ GgufReader      → 提供元数据、张量描述和原始字节读取
 GgufLoader      → 构建 ModelConfig 并装配 MiniLlamaModel
 GgufTokenizer   → 从同一 GGUF 加载词表、BPE 合并和特殊 token
 Context/KvCache → 保存生成期间的运行状态
-Forward         → 消费加载后的 F32 权重并生成 logits
+Forward         → 消费 F32/量化权重并生成 logits
 Sampler         → 从 logits 选择下一个 token
 ```
 
@@ -200,7 +205,7 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-结果：56/56 项测试通过；`gguf_loader.cc` 使用 `-Wall -Wextra -Wpedantic`
+该分支历史结果：56/56 项测试通过；`gguf_loader.cc` 使用 `-Wall -Wextra -Wpedantic`
 独立编译无警告。
 
 真实模型使用：
@@ -233,9 +238,9 @@ sha256: 834f4115ad5a836c9f17716b1577290fda96de3deb881ba45a4d5476fd202e96
 head_dim 64、词表 151936），创建 GGUF tokenizer，执行真实 24 层 CPU 前向和
 采样，生成一个 token，输出文本为 `,`。
 
-当前仓库源码尚未提供可从 CMake 重新构建的进程级 CLI target；以上两条命令
-使用当前 `build/mini-llama` 测试入口完成。该测试入口不属于本分支源码改动，
-后续 CLI 装配模块仍需正式接入 `LoadGgufModel()`。
+上述结果保留阶段验证含义。当前 CMake 已提供正式 `mini-llama` target，
+`RunMain()` 已接入 `LoadGgufModel()`、内嵌 tokenizer 和聊天模板；当前工作区的
+执行路径与最新回归结果见 [CLI 同步说明](cli_integration_status.md)。
 
 ## 当前边界
 
@@ -248,8 +253,8 @@ head_dim 64、词表 151936），创建 GGUF tokenizer，执行真实 24 层 CPU
 - 当前张量映射面向已有 Llama/Qwen2 风格 `LayerWeights`，未知扩展张量会忽略。
 - Qwen2 的 NeoX RoPE 语义已接入；更多架构需要补充对应的 RoPE/模型语义。
 - 模型文件必须是真实 GGUF；Git LFS pointer 文本不能用于解析或生成。
-- 量化 Linear 当前是标量正确性实现，尚未接入 SIMD 或线程池优化。
-- 本分支没有新增进程级 CLI 源码，也没有改变 tokenizer 或 Sampler。
+- 量化 Linear 已支持 batch 与外层并行，Q8_0/Q4_0 支持 NEON；Q4_1 点积和无 NEON 时使用 scalar。
+- Loader 不承担 tokenizer 或 Sampler 职责；当前 CLI 装配已由 `src/main.cc` 完成。
 
 ## 一句话总结
 

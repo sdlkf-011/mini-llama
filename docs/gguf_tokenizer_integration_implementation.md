@@ -1,5 +1,9 @@
 # GGUF Tokenizer 集成实现总结
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 ## 阶段目标
 
 本阶段打通 GGUF 模型从 tokenizer metadata 到实际生成入口的完整链路，并保留
@@ -218,8 +222,9 @@ cmake --build build -j2
 ctest --test-dir build/ -R mini-llama-tests --output-on-failure
 ```
 
-当前注册 6 项 GGUF tokenizer 集成测试和 7 项 Chat Template 集成
-测试；`mini-llama-tests` 共 13 项，全部通过。
+该阶段注册了 6 项 GGUF tokenizer 集成测试和 7 项 Chat Template 集成测试，
+当时前缀筛选共 13 项通过。当前 `mini-llama-tests` 前缀还涵盖量化/线程与 GGUF、
+调试等集成用例，不能把该前缀的现有全部测试数写成 13。
 
 使用真实 Qwen2 模型生成一个 token：
 

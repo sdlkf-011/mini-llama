@@ -1,9 +1,15 @@
 # Sampler、采样策略与生成入口阶段实现汇总
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+>
 > 本文记录对应分支完成时的阶段状态，文中的未接入功能不代表当前仓库现状。
 > 当前 CLI 装配、特殊 token 校验、终端帮助与逐轮追踪见[命令行与模块同步说明](cli_integration_status.md)。
 
-本阶段（`feature/sampler-sampling-strategy`）在已有 Tensor、Tokenizer、推理上下文和前向传播能力上，补充了采样参数、贪心采样、温度采样、Top-k 采样，以及把采样参数接入当前生成流程的基础入口。实现保持在现有项目接口范围内，没有提前引入尚未完成的模型加载、Chat、PromptBuilder、终端交互或后端选择模块。
+本阶段（`feature/sampler-sampling-strategy`）在已有 Tensor、Tokenizer、推理上下文和前向传播能力上，
+补充了采样参数、贪心采样、温度采样、Top-k 采样，以及把采样参数接入当前生成流程的基础入口。实现保持在现有项目接口范围内，没有提前引入尚未完成的模型加载、
+Chat、PromptBuilder、终端交互或后端选择模块。
 
 ## 实现范围
 
@@ -18,7 +24,8 @@
 
 ### 贪心采样
 
-`SampleGreedy` 直接调用现有 `ArgMax` 算子，返回 logits 最大值对应的 token ID。温度小于 `1e-6` 或 `top_k == 1` 时也会进入该路径，避免不必要的概率计算和随机数消耗。
+`SampleGreedy` 直接调用现有 `ArgMax` 算子，返回 logits 最大值对应的 token ID。温度小于 `1e-6` 或
+`top_k == 1` 时也会进入该路径，避免不必要的概率计算和随机数消耗。
 
 ### 温度采样
 
@@ -50,7 +57,7 @@ Top-k 采样先按 logit 从高到低排序，只保留前 `k` 个候选，再�
 
 非法输入通过 `std::runtime_error` 报告，避免空候选、NaN、无穷值或非法参数进入概率计算。
 
-## 当前生成入口
+## 阶段生成入口与当前接入
 
 `src/main.cc` 提供当前阶段所需的最小生成编排：
 
@@ -61,11 +68,13 @@ Top-k 采样先按 logit 从高到低排序，只保留前 `k` 个候选，再�
 5. 使用同一个 `MiniSampler` 循环采样，并通过 `MiniBatch::Single` 执行后续 token 的 decode。
 6. 遇到 EOS、达到最大生成数或到达模型上下文上限时停止。
 
-入口可以识别 `generate` 和 `run` 模式名称，但当前两者共用同一套一次性生成逻辑。这样可以验证采样参数从命令行到 `MiniSampler` 的传递，同时不提前固定后续 Chat 模式的会话、提示词和终端接口。
+上述步骤是阶段初期的最小入口。当前 `generate` 使用单轮 `GenerateTokens()`；
+`run` 使用独立交互循环、ChatSession、PromptBuilder、RadixTree 前缀复用和终端
+命令。两者均已接入同一 `SamplingParams`，EOS 和上下文上限由编排层处理。
 
 ## 参数解析
 
-当前支持以下选项：
+阶段初期支持以下采样与生成选项；当前完整选项见 CLI 同步说明：
 
 ```text
 --prompt <text>
@@ -97,12 +106,14 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-当前环境已完成核心库构建、代码格式检查和独立采样烟雾验证。若 CMake 配置时启用测试并可获得 GTest，可通过上述 `ctest` 命令运行 sampler 单元测试。
+当前环境已完成核心库构建、代码格式检查和独立采样烟雾验证。若 CMake 配置时启用测试并可获得 GTest，可通过上述 `ctest` 命令运行
+sampler 单元测试。
 
 ## 当前边界
 
-- 当前仓库没有模型文件加载接口，`src/main.cc` 不读取或写死 `models/tiny` 等模型路径，而是接收调用方已经构造完成的模型和 tokenizer。
-- 当前没有独立的可执行程序目标，`src/main.cc` 作为核心库中的生成编排实现，不定义全局 `main` 函数。
-- `run` 尚不是完整的交互式 Chat；ChatSession、PromptBuilder、终端命令和历史消息管理留待后续阶段实现。
-- 当前没有量化、CPU/CUDA 后端选择、线程池、GGUF 模型加载、日志转储或 benchmark 模式；这些能力不在本分支范围内。
-- 当前测试仅针对 sampler，不为尚未稳定的生成入口增加专用单元测试。
+- 采样器接受已有 logits，不负责资源加载、前向或 ChatSession 生命周期。
+- 当前全局 main 只在可执行 target 启用，模型/词表/模板由 RunMain 装配。
+- generate/run 使用采样参数；bench 仍只使用贪心，seed 不影响 benchmark 结果。
+- 现有策略是贪心、温度和 Top-k；未实现 Top-p 或重复惩罚。
+- 模型加载、GGUF、量化、CPU 调度、请求追踪和基准模块均已存在；CUDA 当前
+  接入边界与回归结果见 [后端说明](backend_selection_cuda_runtime_implementation.md)。

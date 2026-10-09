@@ -1,5 +1,9 @@
 # CPU 多线程与 F32 SIMD 实现说明
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 本文描述当前 CPU Linear、Matmul、Attention 和 CLI 的并行执行路径。
 统一接口使用 C++17 `std::thread + join`，每次调用创建线程并等待结束。
 本次量化 NEON 点积、batch 与兼容接口的完整总结见
@@ -10,8 +14,8 @@
 | 文件 | 职责 |
 | --- | --- |
 | `include/mini_llama/thread_pool.h`、`src/thread_pool.cc` | 线程配置、连续区间切分与异常回收 |
-| `include/mini_llama/matmul_dispatch.h`、`src/matmul_optimized.cc` | F32 执行模式和 SIMD 点积 |
-| `include/mini_llama/quant.h`、`src/quant.cc` | 量化 Linear 的 NEON/scalar 点积、batch 和外层并行 |
+| [matmul_dispatch.h][dispatch]、`src/matmul_optimized.cc` | F32 执行模式和 SIMD 点积 |
+| [quant.h][quant]、`src/quant.cc` | 量化 Linear：NEON/scalar 点积、batch 与并行 |
 | `include/mini_llama/ops.h`、`src/ops.cc` | 公开算子与量化格式分发 |
 | `src/forward.cc` | CPU Attention 按 query head 并行，保留 GQA 和 bias 语义 |
 | `src/main.cc` | `--threads` 参数解析、执行配置和结果展示 |
@@ -161,4 +165,9 @@ Q8_0/Q4_0/Q4_1 继续按 `QuantType` 分发，不进入 `MatmulMode`。三种量
 均支持 `[in_features]` 和 `[batch, in_features]`，按输入行与输出通道展平任务。
 Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，Q4_1 使用 scalar 点积，外层并行
 在两类路径中均有效。F32 Linear 的输入范围仍为单 token。
-完整 SIMD GEMM、AVX2 量化点积与 GPU 后端保留为独立扩展方向。
+完整 SIMD GEMM 与 AVX2 量化点积仍未实现。Backend/CUDA Runtime、权重上传与
+设备 Tensor 已有库实现；上传不切换 CPU 前向，CUDA 算子、CLI CUDA 推理和 GPU
+Attention/KV Cache 尚未完成，见 [CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
+
+[dispatch]: ../include/mini_llama/matmul_dispatch.h
+[quant]: ../include/mini_llama/quant.h

@@ -1,5 +1,9 @@
 # 模块复习：从真实 GGUF 模型到端到端推理
 
+> 当前完整模块清单见 [README](../README.md)，入口与构建状态见
+> [CLI 同步说明](cli_integration_status.md)。本文中的阶段测试数字、真实模型输出
+> 与计时是历史记录；当前实现与最新回归结果以 README 和 CLI 同步说明为准。
+
 这份文档复习 mini-llama 第二个大模块：**真实模型接入**。
 
 第一份复习文档 `docs/first_major_module_review.md` 解释了“一个已经装配好的
@@ -553,8 +557,9 @@ for each output row:
         sum += input * decoded_weight
 ```
 
-这样不会创建整张 F32 临时权重矩阵。代价是当前实现为标量逐元素解码和点积，
-速度明显低于 SIMD、线程池或成熟推理库。
+这样不会创建整张 F32 临时权重矩阵。当前 Q8_0/Q4_0 点积按平台选择 NEON
+或 scalar，Q4_1 使用 scalar；三种格式均按 batch 行与输出通道展平并行。
+这里没有完整 SIMD GEMM，实际性能仍需固定模型与线程配置测量。
 
 ### 9.5 tied output weight
 
@@ -823,6 +828,7 @@ mini-llama       进程级 CLI
 资源解析器吞掉。
 
 资源选项包括 `--model/-m`、`--config`、`--weights`、`--vocab`、`--tokenizer`；
+当前还接入 `bench`、`--cuda-info`、`--threads`、`--backend` 与 `--device`。
 生成选项包括 `--prompt/-p`、`--max-tokens/--n-predict/-n`、`--temperature`、
 `--top-k`、`--seed`，`generate` 还接受 `--dump-logits`。
 
@@ -876,7 +882,7 @@ mini-llama generate \
 第二大模块将 GGUF 真实模型接入同一条推理链路，保留第一阶段的 manifest Loader。
 当前资源选择、特殊 token 校验和回归状态见[命令行与模块同步说明](cli_integration_status.md)。
 
-## 15. 四个 CLI 模式
+## 15. GGUF 接入阶段的四个 CLI 模式
 
 ### 15.1 `inspect-gguf`
 
@@ -1357,11 +1363,14 @@ stats：交互会话累计消息、上下文和吞吐
 
 ### 性能与内存
 
-- 量化 Linear 是标量实现，没有 SIMD、线程池或 GPU。
+- 三种量化 Linear 已支持 batch 与外层并行；Q8_0/Q4_0 可用 NEON，Q4_1
+  点积为 scalar。整模型重量化到 Q8_0/Q4_0 已有库接口，未接入 CLI。
 - F32 Linear 已支持 SIMD 和输出通道级多线程，Matmul 与 CPU Attention 复用
-  `ParallelFor()`；CLI 支持 `--threads`。这些优化不改变上述量化路径的状态，
+  `ParallelFor()`；CLI 支持 `--threads`，当前调度逐调用创建/回收线程，
   详见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 - `MiniBatch` 仍逐 token 调用 `ForwardToken()`。
+- 已有 Backend/CUDA Runtime、设备 Tensor 和模型上传库接口；上传不切换 CPU
+  前向，CLI CUDA 推理仍拒绝，尚无 CUDA 算子、GPU Attention/KV Cache 或完整驻留 decode。
 - token embedding 会展开为 F32。
 - tied LM Head 当前复制 embedding，而不是共享存储。
 - KV Cache 按完整 `max_seq_len` 一次性分配 F32。
@@ -1448,4 +1457,7 @@ CLI 把模型、tokenizer、template、runtime 和 trace 统一装配；
 
 可以用下面这句话检查自己是否重新掌握了第二个大模块：
 
-> GgufReader 先安全解析真实模型的 metadata、tensor directory 和数据范围；GgufLoader 再把架构配置、GGUF shape 和量化权重映射成 MiniLlamaModel；GgufTokenizer 与 PromptBuilder 从同一文件恢复词表和聊天格式；RunMain 统一解析路径、选择资源并接入第一大模块的 Forward、KV Cache 和 Sampler，最终通过 inspect、generate、run、trace 与全量测试证明真实 Qwen2 GGUF 可以稳定完成端到端推理。
+> GgufReader 先安全解析真实模型的 metadata、tensor directory 和数据范围；GgufLoader 再把架构配置、GGUF
+> shape 和量化权重映射成 MiniLlamaModel；GgufTokenizer 与 PromptBuilder 从同一文件恢复词表和聊天格式；
+> RunMain 统一解析路径、选择资源并接入第一大模块的 Forward、KV Cache 和 Sampler，最终通过 inspect、generate、
+> run、trace 与全量测试证明真实 Qwen2 GGUF 可以稳定完成端到端推理。

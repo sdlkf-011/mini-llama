@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -21,6 +23,7 @@ using mini_llama::MiniLlamaContext;
 using mini_llama::MiniLlamaModel;
 using mini_llama::Tensor;
 
+// 构造可手算的小模型：恒等 Attention 投影、零 FFN，便于核对 logits 与缓存。
 MiniLlamaModel MakeTestModel() {
   MiniLlamaModel model;
   model.config.vocab_size = 3;
@@ -57,6 +60,7 @@ MiniLlamaModel MakeTestModel() {
   return model;
 }
 
+// 将测试中的 F32 线性权重按生产量化规则转换为 Q8_0，保持原始逻辑 shape。
 mini_llama::QuantizedTensor ConvertToQ80(const mini_llama::QuantizedTensor& weight) {
   const Tensor dense = mini_llama::ToTensor(weight);
   mini_llama::QuantizedTensor quantized;
@@ -66,6 +70,7 @@ mini_llama::QuantizedTensor ConvertToQ80(const mini_llama::QuantizedTensor& weig
   return quantized;
 }
 
+// 先核对 shape 与元素数，再逐元素使用绝对容差比较浮点结果。
 void ExpectTensorNear(const Tensor& actual, const Tensor& expected,
                       float tolerance = 1e-5f) {
   ASSERT_EQ(actual.shape, expected.shape);
@@ -195,5 +200,171 @@ TEST(ForwardTest, RejectsInvalidBatch) {
   EXPECT_EQ(context.pos, 0);
   EXPECT_TRUE(context.token_history.empty());
 }
+
+// 使用非零 FFN、GQA、偏置和非完整 Q8_0 块，验证现有 CPU 前向。
+MiniLlamaModel MakeExtendedTestModel(bool q80) {
+  MiniLlamaModel model;
+  auto& c = model.config;
+  c.vocab_size = 7;
+  c.dim = 16;
+  c.hidden_dim = 35;  // Down 投影的输入跨过 32 元素量化块边界并包含尾块
+  c.n_layers = 2;
+  c.n_heads = 4;
+  c.n_kv_heads = 2;  // 四个查询头共享两个 KV 头，覆盖 GQA 映射
+  c.head_dim = 4;
+  c.max_seq_len = 4;
+  c.rope_type = q80 ? mini_llama::RopeType::kNeoX : mini_llama::RopeType::kNormal;
+  model.loaded = true;
+  int seed = 1;
+  // 使用确定性的非零数值，避免随机模型引入不可复现的浮点差异。
+  auto values = [&](const std::vector<int>& shape) {
+    Tensor t(shape);
+    for (size_t i = 0; i < t.size(); ++i) {
+      t.data[i] = 0.12f * std::sin(static_cast<float>(i + seed) * 0.37f);
+    }
+    ++seed;
+    return t;
+  };
+  // 所有 Linear 同步切换存储类型，稠密 embedding/norm/bias 继续保持 F32。
+  auto weight = [&](const std::vector<int>& shape) {
+    auto w = mini_llama::ToQuantizedTensor(values(shape));
+    return q80 ? ConvertToQ80(w) : w;
+  };
+  model.token_embedding = values({c.vocab_size, c.dim});
+  model.final_norm = Tensor({c.dim}, 1.0f);
+  model.lm_head = weight({c.vocab_size, c.dim});
+  model.layers.resize(c.n_layers);
+  for (auto& lw : model.layers) {
+    const int kv_dim = c.n_kv_heads * c.head_dim;
+    lw.attention_norm = Tensor({c.dim}, 1.0f);
+    lw.ffn_norm = Tensor({c.dim}, 1.0f);
+    lw.wq = weight({c.dim, c.dim});
+    lw.wk = weight({kv_dim, c.dim});
+    lw.wv = weight({kv_dim, c.dim});
+    lw.bq = values({c.dim});
+    lw.bk = values({kv_dim});
+    lw.bv = values({kv_dim});
+    lw.wo = weight({c.dim, c.dim});
+    lw.w_gate = weight({c.hidden_dim, c.dim});
+    lw.w_up = weight({c.hidden_dim, c.dim});
+    lw.w_down = weight({c.dim, c.hidden_dim});
+  }
+  // 前层保留非零偏置，末层移除偏置，覆盖两种投影分支。
+  model.layers.back().bq = Tensor();
+  model.layers.back().bk = Tensor();
+  model.layers.back().bv = Tensor();
+  return model;
+}
+
+// 参数 false/true 分别选择 F32/整组 Q8_0 权重；两种参数都执行 CPU 前向。
+class ExtendedForwardTest : public ::testing::TestWithParam<bool> {};
+
+// 批量 prefill/decode 应与手工逐 token 执行一致，包含 GQA、bias 与量化尾块。
+TEST_P(ExtendedForwardTest, MatchesSequentialPrefillDecodeAndKvCache) {
+  MiniLlamaModel model = MakeExtendedTestModel(GetParam());
+  MiniLlamaContext batch_ctx(&model);
+  MiniLlamaContext sequential_ctx(&model);
+  const std::vector<int> tokens = {0, 2, 4, 6};
+  Tensor sequential_logits;
+  for (int pos = 0; pos < 3; ++pos) {
+    sequential_ctx.pos = pos;
+    sequential_logits = ForwardToken(sequential_ctx, model, tokens[pos]);
+    sequential_ctx.token_history.push_back(tokens[pos]);
+  }
+  ExpectTensorNear(ForwardBatch(batch_ctx, model, MiniBatch::FromTokens({0, 2, 4})),
+                   sequential_logits);
+  sequential_ctx.pos = 3;
+  sequential_logits = ForwardToken(sequential_ctx, model, tokens.back());
+  sequential_ctx.token_history.push_back(tokens.back());
+  const Tensor decode_logits =
+      ForwardBatch(batch_ctx, model, MiniBatch::Single(6, 3));
+  ExpectTensorNear(decode_logits, sequential_logits);
+  for (float value : decode_logits.data) EXPECT_TRUE(std::isfinite(value));
+  ExpectTensorNear(batch_ctx.kv_cache.keys, sequential_ctx.kv_cache.keys);
+  ExpectTensorNear(batch_ctx.kv_cache.values, sequential_ctx.kv_cache.values);
+  EXPECT_EQ(batch_ctx.pos, sequential_ctx.pos);
+  EXPECT_EQ(batch_ctx.token_history, tokens);
+  EXPECT_EQ(batch_ctx.token_history, sequential_ctx.token_history);
+}
+
+// 上传接口只管理权重；快照存在时仍使用 CPU 前向，并保留设备运行统计。
+TEST_P(ExtendedForwardTest, CudaSnapshotDoesNotSelectInferenceBackend) {
+  MiniLlamaModel cpu_model = MakeExtendedTestModel(GetParam());
+  MiniLlamaModel model_with_snapshot = cpu_model;
+  model_with_snapshot.cuda_weights =
+      std::make_shared<mini_llama::CudaModelWeights>();
+  // 手工快照只验证后端选择契约，不执行实际上传；非零哨兵验证统计未被清零。
+  model_with_snapshot.cuda_weights->linear_calls = 7;
+  const auto snapshot = model_with_snapshot.cuda_weights;
+  MiniLlamaContext cpu_ctx(&cpu_model);
+  MiniLlamaContext snapshot_ctx(&model_with_snapshot);
+  const MiniBatch prefill = MiniBatch::FromTokens({0, 2, 4});
+  ExpectTensorNear(ForwardBatch(snapshot_ctx, model_with_snapshot, prefill),
+                   ForwardBatch(cpu_ctx, cpu_model, prefill));
+  const MiniBatch decode = MiniBatch::Single(6, 3);
+  ExpectTensorNear(ForwardBatch(snapshot_ctx, model_with_snapshot, decode),
+                   ForwardBatch(cpu_ctx, cpu_model, decode));
+  ExpectTensorNear(snapshot_ctx.kv_cache.keys, cpu_ctx.kv_cache.keys);
+  ExpectTensorNear(snapshot_ctx.kv_cache.values, cpu_ctx.kv_cache.values);
+  EXPECT_EQ(snapshot_ctx.pos, cpu_ctx.pos);
+  EXPECT_EQ(snapshot_ctx.token_history, cpu_ctx.token_history);
+  EXPECT_EQ(model_with_snapshot.cuda_weights, snapshot);
+  EXPECT_EQ(mini_llama::ModelCudaLinearCalls(model_with_snapshot), 7u);
+  EXPECT_EQ(mini_llama::ModelCudaActivationCalls(model_with_snapshot), 0u);
+  EXPECT_EQ(mini_llama::ModelCudaAttentionCpuFallbacks(model_with_snapshot), 0u);
+  EXPECT_EQ(mini_llama::ModelCudaHostToDeviceCopies(model_with_snapshot), 0u);
+  EXPECT_EQ(mini_llama::ModelCudaDeviceToHostCopies(model_with_snapshot), 0u);
+}
+
+// 真实 GPU 上校验上传快照的字节与统计，上传后仍执行相同的 CPU 前向。
+TEST_P(ExtendedForwardTest, UploadSnapshotPreservesWeightsAndCpuForward) {
+  if (!mini_llama::CudaRuntimeBuilt()) {
+    GTEST_SKIP() << "CUDA was not built; model upload was not executed";
+  }
+  try {
+    if (mini_llama::CudaDeviceCount() == 0) {
+      GTEST_SKIP() << "no CUDA devices; model upload was not executed";
+    }
+    mini_llama::CudaGetDeviceInfo(0);
+  } catch (const std::runtime_error& error) {
+    GTEST_SKIP() << "CUDA device query unavailable: " << error.what();
+  }
+  MiniLlamaModel model = MakeExtendedTestModel(GetParam());
+  MiniLlamaContext before_ctx(&model);
+  const auto prefill = MiniBatch::FromTokens({0, 2, 4});
+  const Tensor expected = ForwardBatch(before_ctx, model, prefill);
+  mini_llama::UploadModelWeightsToCuda(model);
+  ASSERT_TRUE(mini_llama::ModelHasCudaWeights(model));
+  EXPECT_EQ(mini_llama::ModelCudaUploadedWeightCount(model), 24u);
+  EXPECT_EQ(mini_llama::ModelCudaMemoryBytes(model),
+            mini_llama::ModelWeightBytes(model));
+  EXPECT_EQ(mini_llama::ModelCudaUploadedF32WeightCount(model),
+            GetParam() ? 0u : 15u);
+  EXPECT_EQ(mini_llama::ModelCudaUploadedQ80WeightCount(model),
+            GetParam() ? 15u : 0u);
+  EXPECT_EQ(mini_llama::ModelCudaUploadedQ40WeightCount(model), 0u);
+  EXPECT_EQ(mini_llama::ModelCudaUploadedQ41WeightCount(model), 0u);
+  for (const auto& weight : model.cuda_weights->weights) {
+    if (weight.name != "lm_head") continue;
+    std::vector<unsigned char> downloaded(weight.buffer.bytes());
+    weight.buffer.Download(downloaded.data(), downloaded.size());
+    const void* original =
+        GetParam() ? static_cast<const void*>(model.lm_head.q8_0_data.data())
+                   : static_cast<const void*>(model.lm_head.f32_data.data());
+    EXPECT_EQ(std::memcmp(downloaded.data(), original, downloaded.size()), 0);
+  }
+  MiniLlamaContext after_ctx(&model);
+  ExpectTensorNear(ForwardBatch(after_ctx, model, prefill), expected);
+  ExpectTensorNear(after_ctx.kv_cache.keys, before_ctx.kv_cache.keys);
+  EXPECT_EQ(mini_llama::ModelCudaLinearCalls(model), 0u);
+  const auto snapshot = model.cuda_weights;
+  model.lm_head.shape[0] += 1;
+  EXPECT_THROW(mini_llama::UploadModelWeightsToCuda(model), std::runtime_error);
+  EXPECT_EQ(model.cuda_weights, snapshot);
+}
+
+// 同时注册 F32 与 Q8_0 参数；仅上传用例需要真实 GPU。
+INSTANTIATE_TEST_SUITE_P(F32AndQ80, ExtendedForwardTest,
+                         ::testing::Values(false, true));
 
 }  // namespace

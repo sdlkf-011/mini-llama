@@ -24,11 +24,16 @@ CPU 调度、F32 SIMD 和测试细节见
 | `--cuda-info` | 查询 CUDA Runtime 构建状态和真实 GPU 信息，失败时返回非零 |
 
 CPU 线程配置已通过 `--threads` 接入推理命令，后端选项和 CUDA Runtime 诊断也已接入。
-CUDA 推理算子与模型权重上传仍属于后续模块，当前 CUDA 推理请求明确报错。
-后端参数、Runtime 接口及本阶段验证结果见
+库层已有 CUDA Tensor、F32/Q8_0 权重上传快照和统计接口；上传不改变库层
+前向后端，当前算子、Attention 与 KV Cache 均在 CPU。CLI 未调用上传接口，
+CUDA 推理请求仍明确报错。CUDA 算子、GPU Attention、GPU KV Cache 和完整
+设备驻留 decode 尚未实现，运行统计为预留字段。
+后端参数、Runtime 当前行为与验证结果见
 [后端选择与 CUDA Runtime 阶段实现汇总](backend_selection_cuda_runtime_implementation.md)。
-整模型重新量化尚未接入 CLI，已有 CPU 量化 Linear 可
-运行 GGUF 中的 Q8_0/Q4_0/Q4_1 权重；单张量量化与模型权重字节统计仍是库能力。
+整模型 `QuantizeModelToQ80/Q40()` 已有库实现，尚未接入 CLI；转换所有 Linear，
+保持 embedding/norm/bias，成功改变权重后清除旧 CUDA 快照。已有 CPU 量化
+Linear 可执行 GGUF Q8_0/Q4_0/Q4_1 权重。单张量量化、权重字节统计与上传也是
+库能力，没有对应命令行开关。
 
 ## 参数与模型选择
 
@@ -66,7 +71,9 @@ CUDA 推理算子与模型权重上传仍属于后续模块，当前 CUDA 推理
 `generate` 和 `bench` 输出实际解析的配置线程数，例如 `threads: 4`。
 Linear 按输出通道、Matmul 按输出行、CPU Attention 按 query head 复用
 `ParallelFor()`。小任务和单线程配置直接在调用线程执行，因此该输出不等于
-每个算子创建的线程数。Q8_0/Q4_0/Q4_1 Linear 的并行优化仍是后续模块。
+每个算子创建的线程数。Q8_0/Q4_0/Q4_1 Linear 已按 batch 行与输出通道展平并行；
+Q8_0/Q4_0 使用 NEON 或 scalar 点积，Q4_1 使用 scalar 点积。F32 Linear 仍限于
+单向量或 `[1, in]`；量化 Linear 支持 `[batch, in]`，ForwardBatch 仍逐 token 执行。
 
 ## 分词器与特殊 token 校验
 
@@ -135,9 +142,38 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 
 ## 回归验证
 
-运行以下命令验证当前源码：
+本阶段接口、所有权与测试覆盖见
+[CUDA Tensor 与模型权重上传阶段总结](cuda_tensor_model_weights_implementation.md)。
+
+已移除不存在的 GPU 前向测试注册，保留 CPU 前向并注册实际存在的 Runtime
+与 CUDA Tensor 测试。Runtime 的零长度操作、设备信息格式、设备恢复及 Reset
+失败状态保持已与既有测试约定对齐；CUDA Tensor 移动后源对象恢复为空。
+
+2026-10-08 对当前源码重新配置、构建并运行全量 CTest：
+
+| 配置 | 注册 | 执行通过 | 跳过 | 失败 |
+| --- | ---: | ---: | ---: | ---: |
+| CPU，MINI_LLAMA_CUDA=OFF | 169 | 157 | 12 | 0 |
+| CUDA，真实单 GPU | 169 | 166 | 3 | 0 |
+
+CPU 跳过 8 项 CUDA Runtime、2 项设备 Tensor 和 2 项模型上传用例。
+CUDA 单 GPU 跳过 2 项 CPU stub 和 1 项多 GPU 用例。CPU 前向专项 12 项中，
+10 项验证 CPU 前向与快照契约，另外 2 项在 GPU 上验证 F32/Q8_0 上传后 CPU
+logits 不变；这不是 GPU 前向验证。
+
+多线程 CLI 专项也已通过：线程配置 1/4/0 的 9 份 logits、生成 ID 与 bench
+输出一致。19 份 Markdown 本地链接检查和 `git diff --check` 通过。
+
+验证构建目录分别为 `/tmp/mini-llama-sync-audit-20261008` 与
+`/tmp/mini-llama-sync-cuda-20261008`，复用现有 googletest 源码。CUDA 使用
+`-DCUDAToolkit_ROOT=/tmp/mini-llama-cuda-sdk`，SDK 版本为 12.9，设备为
+NVIDIA GeForce RTX 4060 Laptop GPU。沙箱内 CUDA 查询失败会导致 GPU 用例
+跳过；表中 CUDA 结果来自允许访问 GPU 的沙箱外运行。
+
+可运行以下命令：
 
 ```bash
+cmake -S . -B build -DMINI_LLAMA_CUDA=OFF
 cmake --build build -j4
 ctest --test-dir build -R mini-llama-tests --output-on-failure
 ctest --test-dir build --output-on-failure -j4
@@ -145,8 +181,9 @@ python3 scripts/test_threaded_cli.py
 ```
 
 CPU 多线程阶段的回归在模型加载、Tokenizer、生成、聊天、检查命令和基准测试之外，新增
-`tests/threaded_matmul_test.cc` 的 9 项多线程测试，CMake 引用与当前文件名一致。
+`tests/threaded_matmul_test.cc` 当时的 9 项多线程测试（现为 14 项），CMake 引用与当前文件名一致。
 该阶段构建成功，全量 CTest **113/113 通过**，`mini-llama-tests` 前缀
 筛选结果为 **22/22 通过**，这些数字与历史文档中的 82、95、104 项均为阶段快照。
-当前 Backend/CUDA Runtime 阶段的全量回归为 CPU 150 项通过、8 项跳过，
-CUDA 单 GPU 156 项通过、2 项跳过，跳过条件与详细证据见本阶段实现汇总。
+此前 Backend/CUDA Runtime 阶段记录过 CPU 150 项通过、8 项跳过，CUDA 单 GPU
+156 项通过、2 项跳过。这是 CUDA Tensor 与扩展前向测试加入之前的阶段快照，
+不是当前测试总数。
