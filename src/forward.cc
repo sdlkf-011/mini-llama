@@ -157,6 +157,24 @@ const CudaUploadedWeight* FindCudaWeight(const MiniLlamaModel& model,
   return nullptr;
 }
 
+// 每个 token 仅检查一次全层 F32 QKV 快照，所有层共享设备注意力分发结果
+static bool CudaQkvReady(const MiniLlamaModel& model) {
+  bool ready = model.cuda_weights != nullptr;
+
+  for (int l = 0; ready && l < model.config.n_layers; ++l) {
+    const auto& weights = model.layers[l];
+    const std::string prefix = "layers." + std::to_string(l) + ".";
+    ready = weights.wq.type == QuantType::kF32 &&
+            weights.wk.type == QuantType::kF32 &&
+            weights.wv.type == QuantType::kF32 &&
+            FindCudaWeight(model, prefix + "wq", QuantType::kF32) &&
+            FindCudaWeight(model, prefix + "wk", QuantType::kF32) &&
+            FindCudaWeight(model, prefix + "wv", QuantType::kF32);
+  }
+
+  return ready;
+}
+
 int CudaDeviceId(const MiniLlamaModel& model) {
   return model.cuda_weights->device_id;
 }
@@ -403,7 +421,7 @@ static Tensor ForwardCudaAttention(MiniLlamaContext& ctx,
 // 单层 Pre-Norm Transformer: Attention + residual, FFN + residual
 static Tensor ForwardLayer(MiniLlamaContext& ctx, const MiniLlamaModel& model,
                            const Tensor& x, int layer, const LayerWeights& lw,
-                           const ModelConfig& c) {
+                           const ModelConfig& c, bool cuda_qkv_ready) {
   const int dim = c.dim;
   const int n_heads = c.n_heads;
   const int n_kv_heads = c.n_kv_heads;
@@ -418,20 +436,8 @@ static Tensor ForwardLayer(MiniLlamaContext& ctx, const MiniLlamaModel& model,
   const auto* wk = FindCudaWeight(model, layer_prefix + "wk", lw.wk.type);
   const auto* wv = FindCudaWeight(model, layer_prefix + "wv", lw.wv.type);
   Tensor attn_out;
-  bool ready = model.cuda_weights != nullptr;
 
-  for (int l = 0; ready && l < c.n_layers; ++l) {
-    const auto& weights = model.layers[l];
-    const std::string prefix = "layers." + std::to_string(l) + ".";
-    ready = weights.wq.type == QuantType::kF32 &&
-            weights.wk.type == QuantType::kF32 &&
-            weights.wv.type == QuantType::kF32 &&
-            FindCudaWeight(model, prefix + "wq", QuantType::kF32) &&
-            FindCudaWeight(model, prefix + "wk", QuantType::kF32) &&
-            FindCudaWeight(model, prefix + "wv", QuantType::kF32);
-  }
-
-  if (ready && wq && wk && wv && lw.wq.type == QuantType::kF32 &&
+  if (cuda_qkv_ready && wq && wk && wv && lw.wq.type == QuantType::kF32 &&
       lw.wk.type == QuantType::kF32 && lw.wv.type == QuantType::kF32) {
     attn_out = ForwardCudaAttention(ctx, model, h, layer, *wq, *wk, *wv);
   } else {
@@ -481,6 +487,7 @@ static Tensor ComputeLogits(const Tensor& x, const MiniLlamaModel& model,
 // 位置推进和 token_history 维护交由 ForwardBatch 或直接调用方负责
 Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int token) {
   ValidateForwardInputs(ctx, model, token);
+  const bool cuda_qkv_ready = CudaQkvReady(model);
   if (!ctx.cuda_kv_cache.empty()) {
     if (!model.cuda_weights ||
         ctx.cuda_kv_cache.device_id() != CudaDeviceId(model)) {
@@ -488,17 +495,9 @@ Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int toke
           "ForwardToken: resident GPU history requires matching CUDA weights");
     }
 
-    for (int layer = 0; layer < model.config.n_layers; ++layer) {
-      const std::string prefix = "layers." + std::to_string(layer) + ".";
-      const auto& lw = model.layers[layer];
-      if (!FindCudaWeight(model, prefix + "wq", QuantType::kF32) ||
-          !FindCudaWeight(model, prefix + "wk", QuantType::kF32) ||
-          !FindCudaWeight(model, prefix + "wv", QuantType::kF32) ||
-          lw.wq.type != QuantType::kF32 || lw.wk.type != QuantType::kF32 ||
-          lw.wv.type != QuantType::kF32) {
-        throw std::runtime_error(
-            "ForwardToken: CUDA QKV snapshot changed; create a new context");
-      }
+    if (!cuda_qkv_ready) {
+      throw std::runtime_error(
+          "ForwardToken: CUDA QKV snapshot changed; create a new context");
     }
   }
 
@@ -506,7 +505,7 @@ Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int toke
   const ModelConfig& c = model.config;
   Tensor x = EmbedToken(model, token);
   for (int layer = 0; layer < c.n_layers; ++layer) {
-    x = ForwardLayer(ctx, model, x, layer, model.layers[layer], c);
+    x = ForwardLayer(ctx, model, x, layer, model.layers[layer], c, cuda_qkv_ready);
   }
   return ComputeLogits(x, model, c);
 }
