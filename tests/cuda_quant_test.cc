@@ -102,6 +102,61 @@ void Reject(const std::vector<Block>& blocks, Host host, Resident resident,
   EXPECT_THROW(host(x, blocks, shape, &bias, 0), std::runtime_error);
 }
 
+// 跨过 grid.y 的边界，并逐行核对三种入口；输入每行不同以检测漏算或行错位。
+template <typename Block, typename Cpu, typename Host, typename Resident,
+          typename Device>
+void VerifyLargeBatch(const std::vector<Block>& blocks, Cpu cpu, Host host,
+                      Resident resident, Device device,
+                      const std::vector<int>& shape = {1, 32},
+                      const std::vector<int>& batch_sizes = {65535, 65536, 65537}) {
+  CudaDeviceBuffer weight(blocks.size() * sizeof(Block));
+  weight.Upload(blocks.data(), weight.bytes());
+  for (int rows : batch_sizes) {
+    SCOPED_TRACE(rows);
+    Tensor x = Values({rows, shape[1]});
+    Tensor expected = cpu(x, blocks, shape);
+    EXPECT_NO_THROW(Close(host(x, blocks, shape, nullptr, 0), expected));
+    Tensor bias({shape[0]}, 0.2f);
+    Tensor biased = expected;
+    for (auto& value : biased.data) value += bias.data[0];
+    EXPECT_NO_THROW(
+        Close(resident(x, weight.data(), blocks.size(), shape, &bias, 0), biased));
+    auto dx = CudaTensorFromHost(x);
+    EXPECT_NO_THROW(Close(
+        device(dx, weight.data(), blocks.size(), shape, 0).Download(), expected));
+  }
+}
+
+TEST_F(cuda_quant_q8_0, LargeBatchAllEntrypointsMatchCpu) {
+  VerifyLargeBatch(QuantizeToQ80(Values({1, 32})), LinearQ80, CudaQ80Linear,
+                   CudaQ80LinearDeviceWeight, CudaQ80LinearDeviceInput);
+  // 任务数超过 65535 * 128，核对跨步计算后的最后一行和多输出通道。
+  VerifyLargeBatch(QuantizeToQ80(Values({129, 1})), LinearQ80, CudaQ80Linear,
+                   CudaQ80LinearDeviceWeight, CudaQ80LinearDeviceInput, {129, 1},
+                   {65537});
+}
+
+TEST_F(cuda_quant_q4, LargeBatchQ40AllEntrypointsMatchCpu) {
+  VerifyLargeBatch(QuantizeToQ40(Values({1, 32})), LinearQ40, CudaQ40Linear,
+                   CudaQ40LinearDeviceWeight, CudaQ40LinearDeviceInput);
+  VerifyLargeBatch(QuantizeToQ40(Values({129, 1})), LinearQ40, CudaQ40Linear,
+                   CudaQ40LinearDeviceWeight, CudaQ40LinearDeviceInput, {129, 1},
+                   {65537});
+}
+
+// 手工 Q4_1 块同时覆盖 d/m 和高低半字节，CPU 使用同一块作为参考。
+TEST_F(cuda_quant_q4, LargeBatchQ41AllEntrypointsMatchCpu) {
+  BlockQ41 block{};
+  block.d = 0x3000;  // FP16 0.125
+  block.m = 0xb800;  // FP16 -0.5
+  for (int i = 0; i < 16; ++i) block.qs[i] = i | ((15 - i) << 4);
+  VerifyLargeBatch(std::vector<BlockQ41>{block}, LinearQ41, CudaQ41Linear,
+                   CudaQ41LinearDeviceWeight, CudaQ41LinearDeviceInput);
+  VerifyLargeBatch(std::vector<BlockQ41>(129, block), LinearQ41, CudaQ41Linear,
+                   CudaQ41LinearDeviceWeight, CudaQ41LinearDeviceInput, {129, 1},
+                   {65537});
+}
+
 // 测试目的：Q8_0 三种入口在整块与尾块、向量与 batch、可选 bias 下与 CPU 一致
 TEST_F(cuda_quant_q8_0, VectorBatchTailBiasAndResidentInputMatchCpu) {
   for (int width : {16, 32, 35, 64, 86}) {

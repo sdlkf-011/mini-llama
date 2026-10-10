@@ -1,6 +1,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -15,6 +16,13 @@ namespace mini_llama {
 namespace {
 
 constexpr int kBlockSize = 128;
+
+// 展平 batch/output 任务，并限制一维网格大小；Kernel 跨步覆盖剩余任务
+dim3 LinearGrid(int rows, int out_features) {
+  const size_t tasks = static_cast<size_t>(rows) * out_features;
+  const size_t blocks = (tasks - 1) / kBlockSize + 1;
+  return dim3(static_cast<unsigned int>(std::min(blocks, size_t{65535})));
+}
 
 // 将 CUDA 状态转为带 API 名称的异常，保留 Runtime 提供的具体失败原因
 void CheckCudaQuant(cudaError_t err, const char* expr) {
@@ -61,31 +69,32 @@ __device__ float HalfBitsToFloat(uint16_t bits) {
   return __half2float(raw);
 }
 
-// 网格 y 维选择 batch 行，x 维选择输出通道，一个线程计算一个 F32 点积
+// 每个线程沿一维网格跨步处理展平的 batch/output 任务，计算 F32 点积
 // 权重按输出行独立分块；尾块只读取真实 in_features，不读取填充元素
 __global__ void Q80LinearKernel(const float* x, const BlockQ80* weight, float* y,
                                 int rows, int in_features, int out_features,
                                 int blocks_per_row) {
-  int out = blockIdx.x * blockDim.x + threadIdx.x;
-  int row = blockIdx.y;
-  if (out >= out_features || row >= rows) {
-    return;
-  }
+  const size_t tasks = static_cast<size_t>(rows) * out_features;
+  for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < tasks; index += static_cast<size_t>(gridDim.x) * blockDim.x) {
+    const int out = static_cast<int>(index % out_features);
+    const size_t row = index / out_features;
 
-  const float* x_row = x + static_cast<size_t>(row) * in_features;
-  const BlockQ80* w_row = weight + static_cast<size_t>(out) * blocks_per_row;
-  float sum = 0.0f;
-  for (int block_index = 0; block_index < blocks_per_row; ++block_index) {
-    const BlockQ80& block = w_row[block_index];
-    float d = HalfBitsToFloat(block.d);
-    int base_k = block_index * kQ80BlockSize;
-    int k_end =
-        base_k + kQ80BlockSize < in_features ? base_k + kQ80BlockSize : in_features;
-    for (int k = base_k; k < k_end; ++k) {
-      sum += d * static_cast<float>(block.qs[k - base_k]) * x_row[k];
+    const float* x_row = x + static_cast<size_t>(row) * in_features;
+    const BlockQ80* w_row = weight + static_cast<size_t>(out) * blocks_per_row;
+    float sum = 0.0f;
+    for (int block_index = 0; block_index < blocks_per_row; ++block_index) {
+      const BlockQ80& block = w_row[block_index];
+      float d = HalfBitsToFloat(block.d);
+      int base_k = block_index * kQ80BlockSize;
+      int k_end = base_k + kQ80BlockSize < in_features ? base_k + kQ80BlockSize
+                                                       : in_features;
+      for (int k = base_k; k < k_end; ++k) {
+        sum += d * static_cast<float>(block.qs[k - base_k]) * x_row[k];
+      }
     }
+    y[index] = sum;
   }
-  y[static_cast<size_t>(row) * out_features + out] = sum;
 }
 
 // 每字节低 4 位对应前 16 个元素，高 4 位对应后 16 个；Q4_0 解码为 d*(q-8)
@@ -106,50 +115,52 @@ __device__ float Q41Value(const BlockQ41& block, int flat_index) {
 __global__ void Q40LinearKernel(const float* x, const BlockQ40* weight, float* y,
                                 int rows, int in_features, int out_features,
                                 int blocks_per_row) {
-  int out = blockIdx.x * blockDim.x + threadIdx.x;
-  int row = blockIdx.y;
-  if (out >= out_features || row >= rows) {
-    return;
-  }
+  const size_t tasks = static_cast<size_t>(rows) * out_features;
+  for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < tasks; index += static_cast<size_t>(gridDim.x) * blockDim.x) {
+    const int out = static_cast<int>(index % out_features);
+    const size_t row = index / out_features;
 
-  const float* x_row = x + static_cast<size_t>(row) * in_features;
-  const BlockQ40* w_row = weight + static_cast<size_t>(out) * blocks_per_row;
-  float sum = 0.0f;
-  for (int block_index = 0; block_index < blocks_per_row; ++block_index) {
-    const BlockQ40& block = w_row[block_index];
-    int base_k = block_index * kQ40BlockSize;
-    int k_end =
-        base_k + kQ40BlockSize < in_features ? base_k + kQ40BlockSize : in_features;
-    for (int k = base_k; k < k_end; ++k) {
-      sum += Q40Value(block, k - base_k) * x_row[k];
+    const float* x_row = x + static_cast<size_t>(row) * in_features;
+    const BlockQ40* w_row = weight + static_cast<size_t>(out) * blocks_per_row;
+    float sum = 0.0f;
+    for (int block_index = 0; block_index < blocks_per_row; ++block_index) {
+      const BlockQ40& block = w_row[block_index];
+      int base_k = block_index * kQ40BlockSize;
+      int k_end = base_k + kQ40BlockSize < in_features ? base_k + kQ40BlockSize
+                                                       : in_features;
+      for (int k = base_k; k < k_end; ++k) {
+        sum += Q40Value(block, k - base_k) * x_row[k];
+      }
     }
+    y[index] = sum;
   }
-  y[static_cast<size_t>(row) * out_features + out] = sum;
 }
 
 // Q4_1 沿相同的逐行块布局计算，并把每块的缩放与偏移都用于点积
 __global__ void Q41LinearKernel(const float* x, const BlockQ41* weight, float* y,
                                 int rows, int in_features, int out_features,
                                 int blocks_per_row) {
-  int out = blockIdx.x * blockDim.x + threadIdx.x;
-  int row = blockIdx.y;
-  if (out >= out_features || row >= rows) {
-    return;
-  }
+  const size_t tasks = static_cast<size_t>(rows) * out_features;
+  for (size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < tasks; index += static_cast<size_t>(gridDim.x) * blockDim.x) {
+    const int out = static_cast<int>(index % out_features);
+    const size_t row = index / out_features;
 
-  const float* x_row = x + static_cast<size_t>(row) * in_features;
-  const BlockQ41* w_row = weight + static_cast<size_t>(out) * blocks_per_row;
-  float sum = 0.0f;
-  for (int block_index = 0; block_index < blocks_per_row; ++block_index) {
-    const BlockQ41& block = w_row[block_index];
-    int base_k = block_index * kQ41BlockSize;
-    int k_end =
-        base_k + kQ41BlockSize < in_features ? base_k + kQ41BlockSize : in_features;
-    for (int k = base_k; k < k_end; ++k) {
-      sum += Q41Value(block, k - base_k) * x_row[k];
+    const float* x_row = x + static_cast<size_t>(row) * in_features;
+    const BlockQ41* w_row = weight + static_cast<size_t>(out) * blocks_per_row;
+    float sum = 0.0f;
+    for (int block_index = 0; block_index < blocks_per_row; ++block_index) {
+      const BlockQ41& block = w_row[block_index];
+      int base_k = block_index * kQ41BlockSize;
+      int k_end = base_k + kQ41BlockSize < in_features ? base_k + kQ41BlockSize
+                                                       : in_features;
+      for (int k = base_k; k < k_end; ++k) {
+        sum += Q41Value(block, k - base_k) * x_row[k];
+      }
     }
+    y[index] = sum;
   }
-  y[static_cast<size_t>(row) * out_features + out] = sum;
 }
 
 // 结果已下载到主机后，按 batch 行广播相加；计算前的入口已校验 bias 存储
@@ -287,7 +298,7 @@ Tensor CudaQ80LinearWithDevicePointer(const Tensor& x, const void* q8_0_device,
   x_dev.Upload(x.data.data(), x.size() * sizeof(float));
 
   dim3 block(kBlockSize);
-  dim3 grid((out_features + kBlockSize - 1) / kBlockSize, rows);
+  dim3 grid = LinearGrid(rows, out_features);
   Q80LinearKernel<<<grid, block>>>(static_cast<const float*>(x_dev.data()),
                                    static_cast<const BlockQ80*>(q8_0_device),
                                    static_cast<float*>(y_dev.data()), rows,
@@ -329,7 +340,7 @@ CudaTensor CudaQ80LinearWithDeviceInput(const CudaTensor& x, const void* q8_0_de
                device_id);
 
   dim3 block(kBlockSize);
-  dim3 grid((out_features + kBlockSize - 1) / kBlockSize, rows);
+  dim3 grid = LinearGrid(rows, out_features);
   Q80LinearKernel<<<grid, block>>>(static_cast<const float*>(x.data()),
                                    static_cast<const BlockQ80*>(q8_0_device),
                                    static_cast<float*>(y.data()), rows, in_features,
@@ -370,7 +381,7 @@ Tensor CudaQ40LinearWithDevicePointer(const Tensor& x, const void* q4_0_device,
   x_dev.Upload(x.data.data(), x.size() * sizeof(float));
 
   dim3 block(kBlockSize);
-  dim3 grid((out_features + kBlockSize - 1) / kBlockSize, rows);
+  dim3 grid = LinearGrid(rows, out_features);
   Q40LinearKernel<<<grid, block>>>(static_cast<const float*>(x_dev.data()),
                                    static_cast<const BlockQ40*>(q4_0_device),
                                    static_cast<float*>(y_dev.data()), rows,
@@ -414,7 +425,7 @@ CudaTensor CudaQ40LinearWithDeviceInput(const CudaTensor& x, const void* q4_0_de
                device_id);
 
   dim3 block(kBlockSize);
-  dim3 grid((out_features + kBlockSize - 1) / kBlockSize, rows);
+  dim3 grid = LinearGrid(rows, out_features);
   Q40LinearKernel<<<grid, block>>>(static_cast<const float*>(x.data()),
                                    static_cast<const BlockQ40*>(q4_0_device),
                                    static_cast<float*>(y.data()), rows, in_features,
@@ -455,7 +466,7 @@ Tensor CudaQ41LinearWithDevicePointer(const Tensor& x, const void* q4_1_device,
   x_dev.Upload(x.data.data(), x.size() * sizeof(float));
 
   dim3 block(kBlockSize);
-  dim3 grid((out_features + kBlockSize - 1) / kBlockSize, rows);
+  dim3 grid = LinearGrid(rows, out_features);
   Q41LinearKernel<<<grid, block>>>(static_cast<const float*>(x_dev.data()),
                                    static_cast<const BlockQ41*>(q4_1_device),
                                    static_cast<float*>(y_dev.data()), rows,
@@ -499,7 +510,7 @@ CudaTensor CudaQ41LinearWithDeviceInput(const CudaTensor& x, const void* q4_1_de
                device_id);
 
   dim3 block(kBlockSize);
-  dim3 grid((out_features + kBlockSize - 1) / kBlockSize, rows);
+  dim3 grid = LinearGrid(rows, out_features);
   Q41LinearKernel<<<grid, block>>>(static_cast<const float*>(x.data()),
                                    static_cast<const BlockQ41*>(q4_1_device),
                                    static_cast<float*>(y.data()), rows, in_features,

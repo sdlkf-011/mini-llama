@@ -55,10 +55,56 @@ ctest --test-dir build --output-on-failure -j4
 ./build/mini-llama inspect-gguf models/tiny/model.gguf
 ```
 
-CUDA 配置使用 `-DMINI_LLAMA_CUDA=ON`，需要 CUDAToolkit 的头文件与 Runtime 库。
-当前模块以 C++17 编译并链接 `CUDA::cudart`，没有 CUDA kernel，也不启用 CUDA
-语言编译。`./build-cuda/mini-llama --cuda-info` 可诊断设备；临时 SDK 可通过
-`-DCUDAToolkit_ROOT=/path/to/sdk` 指定。
+CUDA 配置使用 `-DMINI_LLAMA_CUDA=ON`，需要完整的 CUDA Toolkit，包括编译器、
+头文件、libdevice、CUDA Runtime 和 cuBLAS。当前使用 C++17/CUDA 17，编译
+`src/cuda_ops.cu` 和 `src/cuda_quant.cu`，链接 `CUDA::cudart` 与 `CUDA::cublas`。
+只安装运行库不足以构建或让 Clangd 检查 CUDA 源码。
+
+### CUDA 工具链与 Clangd
+
+将 Toolkit 安装在系统目录或固定用户目录，例如 `/usr/local/cuda-12.3` 或
+`$HOME/.local/share/cuda-12.3`，不要使用 `/tmp`。安装方法见
+[NVIDIA 安装指南](https://docs.nvidia.com/cuda/archive/12.3.2/cuda-installation-guide-linux/index.html)。
+本机验证组合为 CUDA 12.3 与 Clang/Clangd 18；其他设备可以使用 NVCC 或与
+Toolkit 版本兼容的 Clang。NVCC 的主机编译器也须与 Toolkit 版本兼容，例如
+CUDA 12.3 可通过 `-DCMAKE_CUDA_HOST_COMPILER=g++-12` 选择 GCC 12。
+
+以下命令适用于安装在固定用户目录的 CUDA 12.3 与 Clang 18：
+
+```bash
+cmake -S . -B build -DMINI_LLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
+  -DCUDAToolkit_ROOT="$HOME/.local/share/cuda-12.3" \
+  -DCMAKE_CUDA_COMPILER=clang++-18 \
+  -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build build -j4
+ctest --test-dir build --output-on-failure -j4
+./build/mini-llama --cuda-info
+```
+
+`89` 对应本机 GPU；其他设备应按目标 GPU 选择计算能力。需要部署到多个 GPU
+架构时可传入列表，例如 `-DCMAKE_CUDA_ARCHITECTURES="75;80;86;89"`，前提是
+安装的 Toolkit 支持这些架构。使用架构选项需要 CMake 3.18 或更新版本。
+系统已安装 NVCC 时可省略 Clang 编译器参数，让 CMake 使用 NVCC。
+
+CMake 自动生成 `build/compile_commands.json`，包含本机 Toolkit 路径和每个
+CUDA 源文件的编译命令。Clangd 默认会搜索源码上层目录及 `build/`，因此新设备
+配置到 `build/` 即可，无需新增项目 `.clangd` 文件或复制其他机器的编译数据库。
+如果 CPU 与 CUDA 分别配置到 `build/` 和 `build-cuda/`，应在编辑器已有的
+Clangd 设置中将 CUDA 编译数据库目录设为 `build-cuda/`。详见
+[Clangd 编译配置](https://clangd.llvm.org/config.html#compilationdatabase)。
+
+更换编译器或迁移项目后，应重新配置构建目录；CMake 3.24 及更新版本可在
+上面的配置命令中添加 `--fresh`，清除旧机器或旧 SDK 的缓存。首次修正已有
+编辑器会话后重启 Clangd，之后重新打开项目使用同一固定 Toolkit 和编译数据库。
+
+### 在其他设备构建
+
+无 NVIDIA GPU 或无需 CUDA 的设备使用前面的 CPU 构建命令，不需要安装
+Toolkit。CUDA 设备安装完整 Toolkit 后在本机重新运行配置和构建命令；SDK
+路径通过 `CUDAToolkit_ROOT` 指定，项目不写入个人安装路径，也不拷贝构建缓存。
+无需测试时可加入 `-DBUILD_TESTING=OFF`，避免部署环境依赖 GTest、Python 和
+NumPy。CUDA 可执行程序还需要目标机器提供兼容的 NVIDIA 驱动及 CUDA Runtime、
+cuBLAS 动态库；跨 CPU 架构或操作系统部署时应在目标平台重新构建。
 
 `generate`、`run`、`bench`、`inspect` 接受 `--backend cpu|cuda`；`--device ID`
 仅与 CUDA 配置配合。`inspect` 只检查元数据，不查询 GPU 或上传权重。

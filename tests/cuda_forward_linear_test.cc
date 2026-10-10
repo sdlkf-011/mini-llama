@@ -98,6 +98,34 @@ MiniLlamaModel MakeModel(int layers = 2, bool bias = false) {
   return model;
 }
 
+// 必需稠密权重被清空时上传必须失败，并保留完整的旧设备快照。
+TEST_F(CudaForwardLinearTest, EmptyRequiredDenseStoragePreservesSnapshot) {
+  auto model = MakeModel();
+  UploadModelWeightsToCuda(model);
+  const auto snapshot = model.cuda_weights;
+  for (Tensor* weight :
+       {&model.token_embedding, &model.final_norm, &model.layers[0].attention_norm,
+        &model.layers[1].ffn_norm}) {
+    const Tensor original = *weight;
+    weight->data.clear();
+    EXPECT_THROW(UploadModelWeightsToCuda(model), std::runtime_error);
+    EXPECT_EQ(model.cuda_weights, snapshot);
+    *weight = original;
+  }
+}
+
+// 已有 shape 的空 bias 仍表示省略，不应按必需权重处理。
+TEST_F(CudaForwardLinearTest, EmptyOptionalBiasStorageIsOmitted) {
+  auto model = MakeModel(1, true);
+  for (Tensor* bias :
+       {&model.layers[0].bq, &model.layers[0].bk, &model.layers[0].bv}) {
+    bias->data.clear();
+  }
+  UploadModelWeightsToCuda(model);
+  EXPECT_EQ(ModelCudaUploadedWeightCount(model), 12u);
+  EXPECT_EQ(ModelCudaMemoryBytes(model), ModelWeightBytes(model));
+}
+
 // 当前链路中只有 Linear 在 GPU，所有统计对应实际 fallback 边界。
 // 这组断言不能替代尚缺 CUDA Attention/激活链路的 0 H2D / 1 D2H 验收。
 void RequireFallbackStats(const MiniLlamaModel& model, size_t tokens) {

@@ -139,8 +139,6 @@ void AppendWeight(CudaModelWeights& storage, CudaUploadedWeight uploaded,
 // 校验 embedding/norm/bias 的 F32 存储，标记为非 Linear 后复用上传流程
 void UploadDenseWeight(CudaModelWeights& storage, const Tensor& weight,
                        const std::string& name, const std::vector<int>& expected) {
-  // 空 Tensor 表示未提供的普通 F32 权重（典型情况是可选 bias）
-  if (weight.data.empty()) return;
   weight.AssertShape(expected, name.c_str());
   const size_t numel = WeightNumel(weight.shape, name);
   if (weight.data.size() != numel) {
@@ -308,9 +306,16 @@ void UploadModelWeightsToCuda(MiniLlamaModel& model, int device_id) {
     UploadDenseWeight(*storage, layer.attention_norm, prefix + "attention_norm",
                       {c.dim});
     UploadDenseWeight(*storage, layer.ffn_norm, prefix + "ffn_norm", {c.dim});
-    UploadDenseWeight(*storage, layer.bq, prefix + "bq", {c.dim});
-    UploadDenseWeight(*storage, layer.bk, prefix + "bk", {kv_dim});
-    UploadDenseWeight(*storage, layer.bv, prefix + "bv", {kv_dim});
+    // 只有可选 bias 的空存储表示省略，embedding 和 norm 必须完整
+    if (!layer.bq.data.empty()) {
+      UploadDenseWeight(*storage, layer.bq, prefix + "bq", {c.dim});
+    }
+    if (!layer.bk.data.empty()) {
+      UploadDenseWeight(*storage, layer.bk, prefix + "bk", {kv_dim});
+    }
+    if (!layer.bv.data.empty()) {
+      UploadDenseWeight(*storage, layer.bv, prefix + "bv", {kv_dim});
+    }
   }
   VisitLinearWeights(model, [&](const QuantizedTensor& weight,
                                 const std::string& name, const std::vector<int>&) {

@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 #include "mini_llama/ops.h"
 
@@ -93,6 +94,46 @@ TEST_F(CudaOpsGpu, HostAndDeviceOpsMatchCpu) {
     CudaRope(q, k, 3, 10000, type);
     Close(q, eq);
     Close(k, ek);
+  }
+}
+
+// shape 不变而 data 截断或增长时，应在任何 CUDA 操作前拒绝上传。
+TEST_F(CudaOpsGpu, RejectsMismatchedHostStorageBeforeUpload) {
+  Tensor x({35}, 0.2f), weight({35}, 1.0f);
+  auto dx = CudaTensorFromHost(x);
+  for (size_t size : {0u, 34u, 36u}) {
+    Tensor bad = x;
+    bad.data.resize(size);
+    // 非法设备让缺少主机校验的实现安全失败；异常必须来自长度校验。
+    auto storage_error = [](auto call) {
+      try {
+        call();
+        FAIL() << "expected storage size mismatch";
+      } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("storage size mismatch"),
+                  std::string::npos)
+            << e.what();
+      }
+    };
+    storage_error([&] { CudaRmsNorm(bad, weight, 1e-5f, -1); });
+    storage_error([&] { CudaRmsNorm(x, bad, 1e-5f, -1); });
+    storage_error([&] { CudaRmsNormDeviceInput(dx, bad, 1e-5f, -1); });
+    storage_error([&] { CudaSilu(bad, -1); });
+    storage_error([&] { CudaSoftmax(bad, -1); });
+    storage_error([&] { CudaElementwiseMul(bad, x, -1); });
+    storage_error([&] { CudaElementwiseMul(x, bad, -1); });
+    storage_error([&] { CudaElementwiseAdd(bad, x, -1); });
+    storage_error([&] { CudaElementwiseAdd(x, bad, -1); });
+    Tensor q({4, 4}, 0.2f), k({2, 4}, 0.3f);
+    for (RopeType type : {RopeType::kNormal, RopeType::kNeoX}) {
+      Tensor bad_q = q, bad_k = k;
+      bad_q.data.resize(size == 0 ? 0 : (size == 34 ? q.size() - 1 : q.size() + 1));
+      bad_k.data.resize(size == 0 ? 0 : (size == 34 ? k.size() - 1 : k.size() + 1));
+      storage_error([&] { CudaRope(bad_q, k, 3, 10000, type, -1); });
+      storage_error([&] { CudaRope(q, bad_k, 3, 10000, type, -1); });
+      EXPECT_EQ(q.data, Tensor({4, 4}, 0.2f).data);
+      EXPECT_EQ(k.data, Tensor({2, 4}, 0.3f).data);
+    }
   }
 }
 

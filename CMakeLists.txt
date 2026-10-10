@@ -54,7 +54,8 @@ add_library(mini_llama_core
 if(MINI_LLAMA_CUDA)
   target_sources(mini_llama_core PRIVATE src/cuda_ops.cu src/cuda_quant.cu)
   set_target_properties(mini_llama_core PROPERTIES CUDA_STANDARD 17
-                                                  CUDA_STANDARD_REQUIRED ON)
+                                                  CUDA_STANDARD_REQUIRED ON
+                                                  CUDA_RUNTIME_LIBRARY Shared)
   target_compile_definitions(mini_llama_core PUBLIC MINI_LLAMA_USE_CUDA=1)
   target_link_libraries(mini_llama_core PRIVATE CUDA::cudart CUDA::cublas)
 endif()

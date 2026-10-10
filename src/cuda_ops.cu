@@ -1,6 +1,7 @@
 #include <cuda_runtime_api.h>
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -184,8 +185,28 @@ __global__ void RopeNeoXKernel(float* x, int n_heads, int head_dim, int pos,
 // 将元素/维度对数换算为线程块数，Kernel 内仍需保护非整块尾部
 int GridFor(int n) { return (n + kBlockSize - 1) / kBlockSize; }
 
-// 主机逐元素接口校验逻辑 shape；设备重载还要求两个输入位于同一设备
+// shape/data 可独立修改，上传前核对正维度、元素数溢出和实际存储长度
+void ValidateHostStorage(const Tensor& tensor, const char* caller) {
+  if (tensor.shape.empty()) {
+    throw std::runtime_error(std::string(caller) + ": empty shape");
+  }
+  size_t elements = 1;
+  for (int dimension : tensor.shape) {
+    if (dimension <= 0 || elements > std::numeric_limits<size_t>::max() /
+                                         static_cast<size_t>(dimension)) {
+      throw std::runtime_error(std::string(caller) + ": invalid shape");
+    }
+    elements *= static_cast<size_t>(dimension);
+  }
+  if (elements != tensor.data.size()) {
+    throw std::runtime_error(std::string(caller) + ": storage size mismatch");
+  }
+}
+
+// 主机逐元素接口校验 shape 和存储；设备重载还要求两个输入位于同一设备
 void RequireSameShape(const Tensor& a, const Tensor& b, const char* caller) {
+  ValidateHostStorage(a, caller);
+  ValidateHostStorage(b, caller);
   if (a.shape != b.shape) {
     throw std::runtime_error(std::string(caller) + ": shape mismatch " +
                              a.ShapeStringShort() + " vs " + b.ShapeStringShort());
@@ -205,6 +226,7 @@ void RequireSameShape(const CudaTensor& a, const CudaTensor& b, const char* call
 
 // RMSNorm/Softmax 仅接受非空一维输入，设备重载使用相同的秩约束
 void Require1D(const Tensor& x, const char* caller) {
+  ValidateHostStorage(x, caller);
   if (x.num_dims() != 1) {
     throw std::runtime_error(std::string(caller) + ": expected 1D tensor, got " +
                              x.ShapeStringShort());
@@ -226,6 +248,8 @@ void Require1D(const CudaTensor& x, const char* caller) {
 
 // 主机 RoPE 用二维 shape 推导头配置，并在分配/旋转前拒绝非法位置和配对维度
 void ValidateRopeInputs(const Tensor& q, const Tensor& k, int pos, float theta) {
+  ValidateHostStorage(q, "CudaRope");
+  ValidateHostStorage(k, "CudaRope");
   if (q.num_dims() != 2 || k.num_dims() != 2) {
     throw std::runtime_error("CudaRope: expected 2D tensors");
   }
@@ -373,6 +397,7 @@ Tensor CudaRmsNorm(const Tensor& x, const Tensor& weight, float eps, int device_
 
 // 主机 SiLU 只上传输入和下载输出，临时显存由 Buffer 的 RAII 生命周期管理
 Tensor CudaSilu(const Tensor& x, int device_id) {
+  ValidateHostStorage(x, "CudaSilu");
   CudaSetDevice(device_id);
   Tensor y(x.shape, 0.0f);
   CudaDeviceBuffer x_dev(x.size() * sizeof(float), device_id);
