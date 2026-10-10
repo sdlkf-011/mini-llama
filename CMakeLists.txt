@@ -8,9 +8,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# CUDA 模块使用 Runtime API 和 cuBLAS，CPU 构建无需 CUDA Toolkit
+# CUDA 模块使用 Runtime API、cuBLAS 和自定义 Kernel；CPU 构建无需 CUDA Toolkit
 option(MINI_LLAMA_CUDA "Enable the CUDA backend" OFF)
 if(MINI_LLAMA_CUDA)
+  enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
 endif()
 
@@ -20,6 +21,8 @@ add_library(mini_llama_core
   src/cuda_runtime.cc
   src/cuda_tensor.cc
   src/cuda_matmul.cc
+  src/cuda_ops.cc
+  src/cuda_quant.cc
   src/tensor.cc
   src/ops.cc
   src/matmul_optimized.cc
@@ -49,6 +52,10 @@ add_library(mini_llama_core
 )
 
 if(MINI_LLAMA_CUDA)
+  target_sources(mini_llama_core PRIVATE src/cuda_ops.cu src/cuda_quant.cu)
+  set_target_properties(mini_llama_core PROPERTIES CUDA_STANDARD 17
+                                                  CUDA_STANDARD_REQUIRED ON
+                                                  CUDA_RUNTIME_LIBRARY Shared)
   target_compile_definitions(mini_llama_core PUBLIC MINI_LLAMA_USE_CUDA=1)
   target_link_libraries(mini_llama_core PRIVATE CUDA::cudart CUDA::cublas)
 endif()

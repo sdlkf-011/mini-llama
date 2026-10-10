@@ -1,11 +1,13 @@
 # 后端选择、CUDA Runtime 与工作区扩展实现说明
 
-本文按当前工作区同步。CUDA Runtime、F32 CUDA Tensor 和模型权重上传已有库
-实现；当前前向继续使用 CPU 算子，上传快照不切换计算后端。GPU 推理尚未接入。
-历史 Runtime 阶段的运行结果与本次回归结果分别记录。
+本文按当前工作区同步。Runtime、F32 设备 Tensor、模型权重上传、cuBLAS F32
+Matmul/Linear 和独立 Ops/Quant Kernel 已有实现。库前向对命中快照的 F32
+Linear 使用 CUDA，其余路径仍在 CPU；CLI CUDA 推理和完整设备前向尚未接入。
+历史阶段与最近一次实际回归分别记录，独立算子与模型接入不混作同一状态。
 
-设备 Tensor、权重上传与 CPU 前向兼容的本阶段总结见
-[CUDA Tensor 与模型权重上传](cuda_tensor_model_weights_implementation.md)。
+此前设备 Tensor、模型上传阶段见
+[历史阶段总结](cuda_tensor_model_weights_implementation.md)；当前 Ops/Quant 与
+上传维护阶段见[本阶段实现总结](cuda_ops_quant_implementation.md)。
 
 ## 文件与职责
 
@@ -14,12 +16,16 @@
 | [backend.h](../include/mini_llama/backend.h)、[backend.cc](../src/backend.cc) | 后端配置、名称解析、环境校验及执行说明 |
 | [cuda_runtime.h](../include/mini_llama/cuda_runtime.h)、[cuda_runtime.cc](../src/cuda_runtime.cc) | 设备查询、显存分配与拷贝、Buffer 所有权、CPU stub |
 | [cuda_tensor.h](../include/mini_llama/cuda_tensor.h)、[cuda_tensor.cc](../src/cuda_tensor.cc) | 连续 F32 激活 Tensor、形状与字节数校验、主机上传下载 |
+| [cuda_matmul.h](../include/mini_llama/cuda_matmul.h)、[cuda_matmul.cc](../src/cuda_matmul.cc) | cuBLAS F32 Matmul/Linear，主机、设备权重和设备输入接口 |
+| [cuda_ops.h](../include/mini_llama/cuda_ops.h)、[cuda_ops.cu](../src/cuda_ops.cu) | 独立 RMSNorm、SiLU、Softmax、逐元素算子、Embedding 和 RoPE；`.cc` 提供 CPU Stub |
+| [cuda_quant.h](../include/mini_llama/cuda_quant.h)、[cuda_quant.cu](../src/cuda_quant.cu) | 独立 Q8_0/Q4_0/Q4_1 块格式 Linear；`.cc` 提供 CPU Stub |
 | [model.h](../include/mini_llama/model.h)、[model.cc](../src/model.cc) | 权重上传快照、权重/运行统计、整模型重新量化 |
-| [forward.cc](../src/forward.cc) | CPU 前向，F32/Q8_0/Q4_0/Q4_1 Linear 分发，不消费 CUDA 上传快照 |
+| [forward.cc](../src/forward.cc) | 命中快照的 F32 Linear 使用 CUDA；未命中/量化 Linear 和其他算子使用 CPU |
 | [main.cc](../src/main.cc) | CLI 参数、CUDA 诊断和推理接入边界 |
 | [cuda_runtime_test.cc](../tests/cuda_runtime_test.cc) | Runtime、所有权、失败状态及 CLI 行为测试 |
 | [cuda_tensor_test.cc](../tests/cuda_tensor_test.cc) | 空 Tensor、形状与 CPU stub 校验；真实 GPU 上传下载、移动与失败状态保持 |
-| [forward_test.cc](../tests/unit/forward_test.cc) | CPU F32/Q8_0 前向、GQA、bias、KV 对照；GPU 上传快照与上传不切换后端的契约 |
+| [forward_test.cc](../tests/unit/forward_test.cc)、[cuda_forward_linear_test.cc](../tests/cuda_forward_linear_test.cc) | CPU/F32 混合前向、GQA、bias、KV、快照生命周期、运行计数与数值对照 |
+| [cuda_ops_test.cc](../tests/cuda_ops_test.cc)、[cuda_quant_test.cc](../tests/cuda_quant_test.cc) | 独立算子的 CPU Stub、GPU 数值及量化输入校验 |
 
 ## 后端配置与 CLI
 
@@ -102,8 +108,10 @@ Q/K/V bias 以 F32 上传。CPU 权重保留，全部上传成功后替换快照
 正常上传快照中的 Q4_0/Q4_1 分类计数为 0。运行统计包含 Linear、辅助激活、
 Attention/CPU 回退、KV 读写、Host/Device 拷贝次数与字节。
 `ResetModelCudaRuntimeStats()` 只清运行统计，共享快照的模型副本也会看到清零。
-当前 CPU 前向不更新这些运行字段；CUDA Linear、激活、Attention 与 GPU KV
-统计均没有对应的已接入执行路径，不能根据预留字段报告 GPU 推理已实现。
+命中快照的 F32 Linear 记录 CUDA 调用数及实际 H2D/D2H，随后 CPU Attention
+记录 fallback；普通 CPU Linear 不记录 CUDA 调用。独立 Ops/Quant 接口不接受
+模型，也不更新模型统计。激活、设备 Attention 和设备 KV 字段尚无模型前向
+更新路径，不能根据预留字段报告完整 GPU 推理已实现。
 
 `QuantizeModelToQ80/Q40()` 可从 F32/Q8_0/Q4_0/Q4_1 转换所有 Linear，保持
 embedding/norm/bias 不变。先准备全部替换数据，失败保留原模型；成功改变权重后
@@ -111,21 +119,28 @@ embedding/norm/bias 不变。先准备全部替换数据，失败保留原模型
 
 ## 前向路径与未完成部分
 
-`ForwardToken()` 不根据 `model.cuda_weights` 切换后端。Embedding、Linear、
-bias、RMSNorm、SwiGLU、残差与 RoPE 均使用现有 CPU 实现。`MiniLlamaContext`
-只持有 CPU `KvCache`，Attention 在 CPU 上计算。
+`ForwardToken()` 查询 `model.cuda_weights` 中的 Linear 名称和类型。匹配的 F32
+权重形状还须一致，执行时上传 CPU 激活、调用 `CudaLinearDeviceInput()`、下载
+结果；没有快照、空快照、未命中或量化权重继续调用 CPU Linear。清除快照后
+回到 CPU 路径。Embedding、bias、RMSNorm、SwiGLU、残差、RoPE、Attention
+和 `MiniLlamaContext` 的 KV Cache 仍使用 CPU。
 
-`forward_test.cc` 中的 F32/Q8_0 参数均测试 CPU 前向；手工构造空上传快照，
-验证快照存在时 logits、KV、序列状态与运行统计不受影响。另有两项真实 GPU
-上传测试，验证权重字节、数量、显存统计、上传失败保留旧快照，以及上传后
-CPU logits 不变。这些用例不执行 GPU 前向，也不构成 CPU/CUDA logits 对齐
-验证。CUDA 算子、GPU Attention、GPU KV Cache 和设备驻留 decode 属于后续模块。
+独立 `cuda_ops` 已实现相应辅助算子，`cuda_quant` 已实现三种块格式 Linear，
+但当前前向并不调用它们。整模型上传只接受 F32/Q8_0，这也与独立 Q4_0/Q4_1
+设备指针接口的存在不同：调用方可独立上传块并验证算子，尚不能通过模型
+上传入口运行 Q4 整模型 GPU 前向。
+
+现有测试对照 F32 混合前向与 CPU 的 logits、KV、GQA 和 bias，验证借用权重
+不被重新上传及相应 fallback 计数；Q8_0 模型上传后仍使用 CPU 量化 Linear。
+手工空快照保持 CPU 路径。完整设备 Attention、GPU KV Cache 和设备驻留
+decode 属于后续模块，没有通过新增 Model/Context 开关提前实现。
 
 ## 构建与验证
 
-CMake 默认关闭 `MINI_LLAMA_CUDA`。打开后寻找 CUDAToolkit 的头文件与 Runtime
-库，以 C++17 编译并链接 `CUDA::cudart`，公开 `MINI_LLAMA_USE_CUDA=1`。当前
-没有 kernel 或 CUDA 语言源码，不启用 CUDA 编译器。
+CMake 默认关闭 `MINI_LLAMA_CUDA`，CPU 构建编译 `.cc` Stub，不需要 CUDA
+编译器或 Toolkit。打开后启用 CUDA 语言并寻找 CUDAToolkit，编译
+`cuda_ops.cu` / `cuda_quant.cu`，链接 `CUDA::cudart` 和 `CUDA::cublas`，
+公开 `MINI_LLAMA_USE_CUDA=1`。C++ / CUDA 标准均为 C++17。
 
 测试只注册存在的源文件；Runtime 与 Tensor 分别使用 `cuda_runtime.` 和
 `cuda_tensor.` 前缀。需要 GPU 的用例在未构建、无设备或设备查询失败时明确
@@ -138,10 +153,41 @@ ctest --test-dir build --output-on-failure -j4
 cmake -S . -B build-cuda -DMINI_LLAMA_CUDA=ON
 cmake --build build-cuda -j4
 ctest --test-dir build-cuda -R 'cuda_runtime|cuda_tensor|ForwardTest' --output-on-failure
+ctest --test-dir build-cuda --output-on-failure --no-tests=error \
+  -R 'cuda_matmul|cuda_linear|cuda_forward_linear|cuda_ops|cuda_quant_q8_0|cuda_quant_q4'
 ./build-cuda/mini-llama --cuda-info
 ```
 
-2026-10-08 重新构建与回归结果：CPU 全量 169 项中 157 项执行通过、12 项跳过；
+### clangd 的 CUDA 文件诊断
+
+需要先成功配置 `MINI_LLAMA_CUDA=ON`，生成
+`build-cuda/compile_commands.json`。CPU 构建数据库不包含 `.cu`，clangd 若从
+同名 `.cc` 推断命令，会遗漏 CUDA 路径并产生 `cuda_fp16.h` / `cuda_runtime_api.h`
+找不到及 `__global__`、`blockIdx` 未定义等连锁错误。
+
+不添加项目配置文件时，可在检查命令中显式选择 CUDA 编译数据库。
+本机 Clangd 18.1.3 使用 CPU 数据库时两个文件各有 23 个错误，使用下面的
+CUDA 数据库检查命令时均为 0 错误；普通 `.cc` 仍按默认规则检查。
+
+```bash
+clangd --check=src/cuda_ops.cu --compile-commands-dir=build-cuda
+clangd --check=src/cuda_quant.cu --compile-commands-dir=build-cuda
+clangd --check=src/cuda_ops.cc
+```
+
+编辑器可在 clangd 的启动参数中指定
+`--compile-commands-dir=/path/to/mini-llama/build-cuda`，直接读取构建目录中的
+数据库。这里需要换成实际绝对路径；无需在项目根目录添加配置或数据库文件。
+
+最近一次实际全量回归结果：CPU 注册 189 项，161 项通过、28 项跳过；
+CUDA 单 GPU 注册 189 项，182 项通过、7 项跳过，失败均为 0。
+Ops/Quant 专项匹配 8 项：CPU 3 项通过、5 项 GPU 用例跳过；GPU 5 项通过、
+3 项 CPU Stub 跳过。Q8_0/Q4_0 已验证向量、batch、尾块、bias、设备指针与输入。
+Q4_1 GPU 计算尚未专项验证。原始日志见
+[本阶段验证记录](cuda_ops_quant_implementation.md)。
+这些通过结果包括 F32 混合前向和独立算子，未证明完整设备前向或 CLI CUDA 推理。
+
+历史 Runtime/Tensor 阶段回归：CPU 全量 169 项中 157 项执行通过、12 项跳过；
 CUDA 单 GPU 全量 169 项中 166 项执行通过、3 项跳过，失败均为 0。
 Runtime 专项共 13 项：CPU 5 项通过、8 项跳过，CUDA 单 GPU 11 项通过、2 项跳过。
 CUDA Tensor 专项共 5 项：CPU 3 项通过、2 项跳过，CUDA 单 GPU 4 项通过、1 项跳过。

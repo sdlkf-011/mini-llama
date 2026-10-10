@@ -168,7 +168,7 @@ static Tensor ForwardLinear(const MiniLlamaModel& model, const std::string& name
     }
     auto& stats = *model.cuda_weights;
 
-    // 当前 Norm/Attention/FFN 辅助算子只有 CPU 实现，在边界上传/下载
+    // 当前前向的 Norm/Attention/FFN 辅助算子仍使用 CPU，在边界上传/下载
     // 上传快照中的权重始终借用，不在 Decode 中重新上传
     CudaTensor device_x = CudaTensorFromHost(x, CudaDeviceId(model));
     ++stats.host_to_device_copies;
@@ -225,7 +225,7 @@ static Tensor ForwardAdd(const MiniLlamaModel& model, const Tensor& a,
   return y;
 }
 
-// CPU 注意力使用现有 Softmax；当前没有独立的 CUDA Softmax 接口
+// 当前 Attention 仍调用 CPU Softmax；独立 CudaSoftmax 尚未接入此路径
 static Tensor ForwardSoftmax(const Tensor& x) { return Softmax(x); }
 
 // 按模型布局原地旋转 Q/K，pos 是绝对位置，V 不参与 RoPE

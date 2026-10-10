@@ -15,7 +15,7 @@
 namespace {
 using namespace mini_llama;
 
-// 测试自包含：不依赖额外的 CUDA 测试辅助头文件。
+// 测试自包含；同时检查 shape、有限值和按参考值缩放的容差，避免只看最终 token
 void RequireCloseTensor(const Tensor& actual, const Tensor& golden,
                         float tolerance = 2e-5f) {
   ASSERT_EQ(actual.shape, golden.shape);
@@ -28,6 +28,7 @@ void RequireCloseTensor(const Tensor& actual, const Tensor& golden,
   }
 }
 
+// 确定性的非零权重让漏投影、错误层权重和残差路径更容易在数值对照中暴露
 Tensor Values(const std::vector<int>& shape, float phase = 0) {
   Tensor result(shape);
   for (size_t i = 0; i < result.size(); ++i) {
@@ -36,6 +37,7 @@ Tensor Values(const std::vector<int>& shape, float phase = 0) {
   return result;
 }
 
+// GPU 不可用时明确跳过；查询成功后的上传、计算和下载异常仍使测试失败
 class CudaGpuTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -55,6 +57,7 @@ class CudaGpuTest : public ::testing::Test {
 
 using CudaForwardLinearTest = CudaGpuTest;
 
+// 小模型包含 GQA、非零 FFN 与可选 Q/K/V bias；隐藏维度 35 也覆盖量化尾块
 MiniLlamaModel MakeModel(int layers = 2, bool bias = false) {
   MiniLlamaModel model;
   auto& c = model.config;
@@ -95,6 +98,34 @@ MiniLlamaModel MakeModel(int layers = 2, bool bias = false) {
   return model;
 }
 
+// 必需稠密权重被清空时上传必须失败，并保留完整的旧设备快照。
+TEST_F(CudaForwardLinearTest, EmptyRequiredDenseStoragePreservesSnapshot) {
+  auto model = MakeModel();
+  UploadModelWeightsToCuda(model);
+  const auto snapshot = model.cuda_weights;
+  for (Tensor* weight :
+       {&model.token_embedding, &model.final_norm, &model.layers[0].attention_norm,
+        &model.layers[1].ffn_norm}) {
+    const Tensor original = *weight;
+    weight->data.clear();
+    EXPECT_THROW(UploadModelWeightsToCuda(model), std::runtime_error);
+    EXPECT_EQ(model.cuda_weights, snapshot);
+    *weight = original;
+  }
+}
+
+// 已有 shape 的空 bias 仍表示省略，不应按必需权重处理。
+TEST_F(CudaForwardLinearTest, EmptyOptionalBiasStorageIsOmitted) {
+  auto model = MakeModel(1, true);
+  for (Tensor* bias :
+       {&model.layers[0].bq, &model.layers[0].bk, &model.layers[0].bv}) {
+    bias->data.clear();
+  }
+  UploadModelWeightsToCuda(model);
+  EXPECT_EQ(ModelCudaUploadedWeightCount(model), 12u);
+  EXPECT_EQ(ModelCudaMemoryBytes(model), ModelWeightBytes(model));
+}
+
 // 当前链路中只有 Linear 在 GPU，所有统计对应实际 fallback 边界。
 // 这组断言不能替代尚缺 CUDA Attention/激活链路的 0 H2D / 1 D2H 验收。
 void RequireFallbackStats(const MiniLlamaModel& model, size_t tokens) {
@@ -115,6 +146,8 @@ void RequireFallbackStats(const MiniLlamaModel& model, size_t tokens) {
             output_elements * sizeof(float) * tokens);
 }
 
+// 测试目的：对照常驻 F32 Linear 混合前向与 CPU 的 prefill/decode、KV 和序列状态
+// 上传后置零 CPU Linear 权重作为探针，确认 decode 仍借用原设备快照和指针
 TEST_F(CudaForwardLinearTest, ResidentF32ProjectionsMatchCpuPrefillAndDecode) {
   MiniLlamaModel cpu_model = MakeModel();
   MiniLlamaModel cuda_model = cpu_model;
@@ -168,6 +201,8 @@ TEST_F(CudaForwardLinearTest, ResidentF32ProjectionsMatchCpuPrefillAndDecode) {
             << ", D2H=" << ModelCudaDeviceToHostCopies(cuda_model) << '\n';
 }
 
+// 测试目的：验证不同层数下所有投影均被分发，并与 CPU 的 GQA、NeoX RoPE
+// 和可选 bias 结果一致；运行计数须随真实层数和 token 数变化
 TEST_F(CudaForwardLinearTest, CoversAllLayersGqaAndOptionalBias) {
   for (int layers : {1, 3}) {
     MiniLlamaModel cpu_model = MakeModel(layers, true);
@@ -185,6 +220,7 @@ TEST_F(CudaForwardLinearTest, CoversAllLayersGqaAndOptionalBias) {
   }
 }
 
+// 测试目的：上传快照存在时使用 F32 CUDA Linear，清除后恢复 CPU 前向且查询计数为零
 TEST_F(CudaForwardLinearTest, ResidentWeightsAreUsedUntilSnapshotIsCleared) {
   MiniLlamaModel cpu_model = MakeModel();
   MiniLlamaModel uploaded_model = cpu_model;
@@ -205,6 +241,31 @@ TEST_F(CudaForwardLinearTest, ResidentWeightsAreUsedUntilSnapshotIsCleared) {
   EXPECT_EQ(ModelCudaDeviceToHostCopies(uploaded_model), 0u);
 }
 
+// 测试目的：重复上传替换并释放旧快照；清除一个模型不释放副本仍共享的显存
+// 最后一个持有者清除引用后，弱引用才失效，验证共享快照的资源生命周期
+TEST_F(CudaForwardLinearTest, ReuploadAndClearRespectSharedOwnership) {
+  MiniLlamaModel model = MakeModel();
+  UploadModelWeightsToCuda(model);
+  std::weak_ptr<CudaModelWeights> first = model.cuda_weights;
+  const size_t uploaded_bytes = ModelCudaMemoryBytes(model);
+
+  UploadModelWeightsToCuda(model);
+  EXPECT_TRUE(first.expired());
+  EXPECT_EQ(ModelCudaUploadedWeightCount(model), 21u);
+  EXPECT_EQ(ModelCudaMemoryBytes(model), uploaded_bytes);
+
+  MiniLlamaModel shared = model;
+  std::weak_ptr<CudaModelWeights> second = model.cuda_weights;
+  ClearModelCudaWeights(model);
+  EXPECT_FALSE(ModelHasCudaWeights(model));
+  EXPECT_FALSE(second.expired());
+  EXPECT_TRUE(ModelHasCudaWeights(shared));
+  ClearModelCudaWeights(shared);
+  EXPECT_TRUE(second.expired());
+}
+
+// 测试目的：当前模型前向中的 Q8_0 和未命中 F32 权重分别走 CPU Linear
+// CUDA 调用及拷贝只统计实际命中的 F32 投影，混合结果仍须与 CPU 一致
 TEST_F(CudaForwardLinearTest, MissingOrQuantizedWeightsUseCpuLinearFallback) {
   MiniLlamaModel cpu_model = MakeModel();
   auto& wk = cpu_model.layers[0].wk;

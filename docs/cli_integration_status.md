@@ -9,7 +9,9 @@ CPU 调度、F32 SIMD 和测试细节见
 
 ## 构建与入口
 
-所有 `src/*.cc` 已纳入 `mini_llama_core`。`mini-llama` 可执行目标定义
+所有 `src/*.cc` 已纳入 `mini_llama_core`；`cuda_ops.cu`、`cuda_quant.cu` 仅在
+CUDA 构建中编译，链接 Runtime 和 cuBLAS，C++ / CUDA 标准均为 C++17。
+`mini-llama` 可执行目标定义
 `MINI_LLAMA_BUILD_EXECUTABLE`，启用同一个 `src/main.cc` 中的全局 `main()`。
 测试可直接使用流注入的 `RunMain()`；库入口 `Generate()`、`Run()` 继续接受已加载
 的模型与分词器。
@@ -24,10 +26,12 @@ CPU 调度、F32 SIMD 和测试细节见
 | `--cuda-info` | 查询 CUDA Runtime 构建状态和真实 GPU 信息，失败时返回非零 |
 
 CPU 线程配置已通过 `--threads` 接入推理命令，后端选项和 CUDA Runtime 诊断也已接入。
-库层已有 CUDA Tensor、F32/Q8_0 权重上传快照和统计接口；上传不改变库层
-前向后端，当前算子、Attention 与 KV Cache 均在 CPU。CLI 未调用上传接口，
-CUDA 推理请求仍明确报错。CUDA 算子、GPU Attention、GPU KV Cache 和完整
-设备驻留 decode 尚未实现，运行统计为预留字段。
+库层已有 CUDA Tensor、F32/Q8_0 上传快照、cuBLAS F32 Linear 和独立
+Ops/Quant Kernel。`ForwardToken()` 对命中上传快照的 F32 Linear 执行 CUDA，
+其余算子、量化/未命中 Linear、Attention 与 KV Cache 仍在 CPU。
+独立 Ops/Quant 尚未接入模型前向。F32 混合路径记录 Linear、CPU Attention
+fallback 和边界 H2D/D2H；激活、设备 Attention、设备 KV 字段仍为预留计数。
+CLI 未调用上传接口，CUDA 推理请求仍明确报错；没有完整设备驻留 decode。
 后端参数、Runtime 当前行为与验证结果见
 [后端选择与 CUDA Runtime 阶段实现汇总](backend_selection_cuda_runtime_implementation.md)。
 整模型 `QuantizeModelToQ80/Q40()` 已有库实现，尚未接入 CLI；转换所有 Linear，
@@ -142,6 +146,14 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 
 ## 回归验证
 
+最近一次实际全量回归中，CPU 161 项通过、28 项跳过，CUDA 单 GPU
+182 项通过、7 项跳过；均注册 189 项，失败为 0。
+独立 Ops/Quant 专项匹配 8 项：CPU 3 项通过、5 项跳过，GPU 5 项通过、
+3 项 CPU Stub 跳过。原始日志见[本阶段验证记录](cuda_ops_quant_implementation.md)。
+完整设备前向和 CUDA CLI benchmark 仍属于后续模块，未计入这些通过结果。
+
+以下为较早的 CUDA Tensor 阶段记录，保留当时的接入范围，不能作为当前总数。
+
 本阶段接口、所有权与测试覆盖见
 [CUDA Tensor 与模型权重上传阶段总结](cuda_tensor_model_weights_implementation.md)。
 
@@ -149,7 +161,7 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 与 CUDA Tensor 测试。Runtime 的零长度操作、设备信息格式、设备恢复及 Reset
 失败状态保持已与既有测试约定对齐；CUDA Tensor 移动后源对象恢复为空。
 
-2026-10-08 对当前源码重新配置、构建并运行全量 CTest：
+设备存储阶段对当时源码重新配置、构建并运行全量 CTest：
 
 | 配置 | 注册 | 执行通过 | 跳过 | 失败 |
 | --- | ---: | ---: | ---: | ---: |
@@ -164,8 +176,7 @@ logits 不变；这不是 GPU 前向验证。
 多线程 CLI 专项也已通过：线程配置 1/4/0 的 9 份 logits、生成 ID 与 bench
 输出一致。19 份 Markdown 本地链接检查和 `git diff --check` 通过。
 
-验证构建目录分别为 `/tmp/mini-llama-sync-audit-20261008` 与
-`/tmp/mini-llama-sync-cuda-20261008`，复用现有 googletest 源码。CUDA 使用
+历史验证分别使用独立的 CPU/CUDA 构建目录，复用现有 googletest 源码。CUDA 使用
 `-DCUDAToolkit_ROOT=/tmp/mini-llama-cuda-sdk`，SDK 版本为 12.9，设备为
 NVIDIA GeForce RTX 4060 Laptop GPU。沙箱内 CUDA 查询失败会导致 GPU 用例
 跳过；表中 CUDA 结果来自允许访问 GPU 的沙箱外运行。
