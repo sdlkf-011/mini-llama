@@ -61,7 +61,7 @@ struct CudaUploadedWeight {
 
 // 模型的 CUDA 权重快照与统计信息。上传统计独立记录，运行统计由推理调用方累计
 // 无快照或未命中的 CPU Linear 不更新计数；命中 F32 权重时记录 CUDA 调用与拷贝
-// 设备 Attention/KV Cache 尚未实现，CPU Attention fallback 单独计数
+// F32 QKV 设备链路记录 Attention/KV 流量；混合路径的 CPU fallback 单独计数
 struct CudaModelWeights {
   int device_id = 0;                 // 权重所在的 CUDA 设备编号
   size_t uploaded_weight_count = 0;  // 已上传的权重数量，包含稠密与线性权重
@@ -138,7 +138,7 @@ size_t ModelCudaLinearCalls(const MiniLlamaModel& model);
 // 读取 CUDA 激活与辅助算子计数；独立 cuda_ops 尚未接入前向，当前前向不更新此字段
 size_t ModelCudaActivationCalls(const MiniLlamaModel& model);
 
-// 读取设备 Attention 计数；当前前向使用 CPU Attention，不更新此字段
+// 读取设备 Attention 累计调用次数
 size_t ModelCudaAttentionCalls(const MiniLlamaModel& model);
 
 // 读取设备推理中的 CPU Attention 回退次数，普通 CPU 前向不计作回退

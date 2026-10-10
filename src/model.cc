@@ -400,7 +400,7 @@ size_t ModelCudaActivationCalls(const MiniLlamaModel& model) {
   return RuntimeStat(model, &CudaModelWeights::activation_calls);
 }
 
-// 读取已记录的设备 Attention 调用数；当前尚无设备 Attention 执行入口
+// 读取已记录的设备 Attention 调用数
 size_t ModelCudaAttentionCalls(const MiniLlamaModel& model) {
   return RuntimeStat(model, &CudaModelWeights::attention_calls);
 }
