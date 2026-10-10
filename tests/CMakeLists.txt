@@ -105,3 +105,7 @@ target_compile_definitions(mini-llama-chat-integration-tests
 # 本阶段独立 CUDA Ops/Quant 测试，不包含后续设备前向模块
 add_unit_test(mini-llama-cuda-quant-tests cuda_quant_test.cc)
 add_unit_test(mini-llama-cuda-ops-tests cuda_ops_test.cc "cuda_ops.")
+
+add_unit_test(mini-llama-cuda-kv-cache-tests test_cuda_kv_cache.cc "cuda_kv_cache.")
+
+add_unit_test(mini-llama-cuda-attention-tests cuda_attention_test.cc "cuda_attention.")

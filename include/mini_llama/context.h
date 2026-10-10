@@ -3,6 +3,7 @@
 
 #include <vector>
 
+#include "mini_llama/cuda_kv_cache.h"
 #include "mini_llama/kv_cache.h"
 #include "mini_llama/model.h"
 
@@ -12,6 +13,8 @@ namespace mini_llama {
 struct MiniLlamaContext {
   const MiniLlamaModel* model = nullptr;
   KvCache kv_cache;
+  // 仅在本阶段 CUDA QKV/Attention 链路首次执行时分配显存
+  CudaKvCache cuda_kv_cache;
   int pos = 0;
 
   // 所有已经送入此上下文的 token（包括预填充阶段）

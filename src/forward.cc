@@ -1,12 +1,15 @@
 #include "mini_llama/forward.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "mini_llama/cuda_attention.h"
 #include "mini_llama/cuda_matmul.h"
+#include "mini_llama/cuda_ops.h"
 #include "mini_llama/ops.h"
 #include "mini_llama/thread_pool.h"
 
@@ -235,7 +238,7 @@ static void ForwardRope(const MiniLlamaModel& model, Tensor& q, Tensor& k, int p
   Rope(q, k, pos, theta, rope_type);
 }
 
-// Embedding lookup: token_id -> x[dim]
+// 按 token_id 查找嵌入表，得到 x[dim]
 static Tensor EmbedToken(const MiniLlamaModel& model, int token_id) {
   const int dim = model.config.dim;
   const size_t offset = static_cast<size_t>(token_id) * static_cast<size_t>(dim);
@@ -250,7 +253,7 @@ static int MapQHeadToKvHead(int q_head, int n_heads, int n_kv_heads) {
 }
 
 // q: [n_heads, head_dim], k/v: [n_kv_heads, head_dim]
-// 上下文尚未持有 CUDA KV Cache，缓存和注意力目前在 CPU 上执行
+// CPU 与混合回退路径继续使用主机缓存和 CPU 注意力
 static Tensor AttentionForward(const MiniLlamaModel& model, const Tensor& q,
                                const Tensor& k, const Tensor& v, int pos, int layer,
                                KvCache& kv_cache, int n_heads, int n_kv_heads,
@@ -303,6 +306,100 @@ static Tensor FfnForward(const MiniLlamaModel& model,
                        ForwardSwiGlu(model, gate, up), lw.w_down);
 }
 
+// 本阶段将 QKV、RoPE、缓存和注意力保留在设备侧
+// Norm、O 投影和 FFN 继续使用现有分发，设备前向由后续模块接入
+static Tensor ForwardCudaAttention(MiniLlamaContext& ctx,
+                                   const MiniLlamaModel& model, const Tensor& h,
+                                   int layer, const CudaUploadedWeight& wq,
+                                   const CudaUploadedWeight& wk,
+                                   const CudaUploadedWeight& wv) {
+  const auto& c = model.config;
+  const auto& lw = model.layers[layer];
+  auto& stats = *model.cuda_weights;
+  const int device = stats.device_id;
+  auto& cache = ctx.cuda_kv_cache;
+  if (cache.empty()) {
+    cache.Reset(c.n_layers, c.max_seq_len, c.n_kv_heads, c.head_dim, device);
+
+    // CUDA 权重就绪前可能已有 CPU 历史，仅在首次分配时迁移该前缀
+    for (int l = 0; l < c.n_layers; ++l) {
+      for (int t = 0; t < ctx.pos; ++t) {
+        Tensor key({c.n_kv_heads, c.head_dim}), value(key.shape);
+        std::copy_n(ctx.kv_cache.KeyPtr(l, t, 0), key.size(), key.data.begin());
+        std::copy_n(ctx.kv_cache.valuePtr(l, t, 0), value.size(),
+                    value.data.begin());
+        cache.Write(l, t, key, value);
+        stats.host_to_device_copies += 2;
+        stats.host_to_device_bytes += 2 * key.size() * sizeof(float);
+        stats.kv_cache_write_bytes += 2 * key.size() * sizeof(float);
+      }
+    }
+  }
+
+  if (cache.device_id() != device || cache.n_layers() != c.n_layers ||
+      cache.max_seq_len() != c.max_seq_len || cache.n_kv_heads() != c.n_kv_heads ||
+      cache.head_dim() != c.head_dim) {
+    throw std::runtime_error("ForwardToken: CUDA KV cache configuration mismatch");
+  }
+
+  auto input = CudaTensorFromHost(h, device);
+  ++stats.host_to_device_copies;
+  stats.host_to_device_bytes += input.bytes();
+  auto project = [&](const CudaUploadedWeight& weight, const QuantizedTensor& host,
+                     const Tensor& bias, const char* bias_name) {
+    if (weight.shape != host.shape || weight.buffer.empty()) {
+      throw std::runtime_error("ForwardToken: CUDA QKV weight mismatch");
+    }
+
+    auto result =
+        CudaLinearDeviceInput(input, weight.buffer.data(), weight.shape, device);
+    ++stats.linear_calls;
+
+    if (!bias.data.empty()) {
+      const std::string name = "layers." + std::to_string(layer) + "." + bias_name;
+      const CudaUploadedWeight* resident = nullptr;
+      for (const auto& w : stats.weights) {
+        if (w.name == name && !w.linear) resident = &w;
+      }
+
+      if (!resident || resident->shape != bias.shape || resident->buffer.empty()) {
+        throw std::runtime_error("ForwardToken: missing CUDA QKV bias " + name);
+      }
+      result = CudaElementwiseAddDeviceWeight(result, resident->buffer.data(),
+                                              resident->shape, device);
+      ++stats.activation_calls;
+    }
+    return result;
+  };
+
+  auto q = project(wq, lw.wq, lw.bq, "bq");
+  auto k_flat = project(wk, lw.wk, lw.bk, "bk");
+  auto v_flat = project(wv, lw.wv, lw.bv, "bv");
+  CudaTensor k({c.n_kv_heads, c.head_dim}, device);
+  CudaTensor v({c.n_kv_heads, c.head_dim}, device);
+  CudaMemcpyBytes(k.data(), k_flat.data(), k.bytes(),
+                  CudaMemcpyKind::kDeviceToDevice);
+  CudaMemcpyBytes(v.data(), v_flat.data(), v.bytes(),
+                  CudaMemcpyKind::kDeviceToDevice);
+  CudaRopeDeviceInput(q, k, c.n_heads, c.n_kv_heads, c.head_dim, ctx.pos,
+                      c.rope_theta, c.rope_type, device);
+  ++stats.activation_calls;
+  cache.WriteDevice(layer, ctx.pos, k, v);
+  stats.kv_cache_write_bytes += 2 * k.bytes();
+  auto result = CudaAttentionDecodeDeviceInput(q, cache, layer, ctx.pos, c.n_heads,
+                                               c.n_kv_heads, c.head_dim, device);
+  ++stats.attention_calls;
+
+  // 按查询头统计逻辑 KV 读取流量一次；GQA 共享头按各查询头分别计入
+  stats.kv_cache_read_bytes +=
+      2 * static_cast<size_t>(ctx.pos + 1) * c.n_heads * c.head_dim * sizeof(float);
+  Tensor host_result = result.Download();
+  ++stats.device_to_host_copies;
+  stats.device_to_host_bytes += result.bytes();
+  return host_result.ReshapeChecked({c.n_heads, c.head_dim},
+                                    "CUDA attention output");
+}
+
 // 单层 Pre-Norm Transformer: Attention + residual, FFN + residual
 static Tensor ForwardLayer(MiniLlamaContext& ctx, const MiniLlamaModel& model,
                            const Tensor& x, int layer, const LayerWeights& lw,
@@ -317,20 +414,41 @@ static Tensor ForwardLayer(MiniLlamaContext& ctx, const MiniLlamaModel& model,
   // Attention：Pre-Norm -> Q/K/V 与 bias -> 分头 -> RoPE -> 因果 GQA
   Tensor h = ForwardRmsNorm(model, layer_prefix + "attention_norm", x,
                             lw.attention_norm, c.rms_norm_eps);
-  Tensor q_flat, k_flat, v_flat;
-  const size_t linear_calls_before_qkv = ModelCudaLinearCalls(model);
-  ForwardQkvProjection(model, layer_prefix, h, lw, q_flat, k_flat, v_flat);
-  Tensor q = q_flat.ReshapeChecked({n_heads, head_dim}, "forward_layer q");
-  Tensor k = k_flat.ReshapeChecked({n_kv_heads, head_dim}, "forward_layer k");
-  Tensor v = v_flat.ReshapeChecked({n_kv_heads, head_dim}, "forward_layer v");
-  ForwardRope(model, q, k, pos, c.rope_theta, c.rope_type);
-  Tensor attn_out = AttentionForward(model, q, k, v, pos, layer, ctx.kv_cache,
-                                     n_heads, n_kv_heads, head_dim);
+  const auto* wq = FindCudaWeight(model, layer_prefix + "wq", lw.wq.type);
+  const auto* wk = FindCudaWeight(model, layer_prefix + "wk", lw.wk.type);
+  const auto* wv = FindCudaWeight(model, layer_prefix + "wv", lw.wv.type);
+  Tensor attn_out;
+  bool ready = model.cuda_weights != nullptr;
 
-  // Q/K/V 实际执行过 CUDA 投影时，后续 CPU Attention 才计作设备链路回退
-  if (model.cuda_weights && ModelCudaLinearCalls(model) > linear_calls_before_qkv) {
-    ++model.cuda_weights->attention_cpu_fallbacks;
+  for (int l = 0; ready && l < c.n_layers; ++l) {
+    const auto& weights = model.layers[l];
+    const std::string prefix = "layers." + std::to_string(l) + ".";
+    ready = weights.wq.type == QuantType::kF32 &&
+            weights.wk.type == QuantType::kF32 &&
+            weights.wv.type == QuantType::kF32 &&
+            FindCudaWeight(model, prefix + "wq", QuantType::kF32) &&
+            FindCudaWeight(model, prefix + "wk", QuantType::kF32) &&
+            FindCudaWeight(model, prefix + "wv", QuantType::kF32);
   }
+
+  if (ready && wq && wk && wv && lw.wq.type == QuantType::kF32 &&
+      lw.wk.type == QuantType::kF32 && lw.wv.type == QuantType::kF32) {
+    attn_out = ForwardCudaAttention(ctx, model, h, layer, *wq, *wk, *wv);
+  } else {
+    Tensor q_flat, k_flat, v_flat;
+    const size_t before = ModelCudaLinearCalls(model);
+    ForwardQkvProjection(model, layer_prefix, h, lw, q_flat, k_flat, v_flat);
+    Tensor q = q_flat.ReshapeChecked({n_heads, head_dim}, "forward_layer q");
+    Tensor k = k_flat.ReshapeChecked({n_kv_heads, head_dim}, "forward_layer k");
+    Tensor v = v_flat.ReshapeChecked({n_kv_heads, head_dim}, "forward_layer v");
+    ForwardRope(model, q, k, pos, c.rope_theta, c.rope_type);
+    attn_out = AttentionForward(model, q, k, v, pos, layer, ctx.kv_cache, n_heads,
+                                n_kv_heads, head_dim);
+    if (model.cuda_weights && ModelCudaLinearCalls(model) > before) {
+      ++model.cuda_weights->attention_cpu_fallbacks;
+    }
+  }
+
   // 拼接查询头输出，执行 O 投影并加回本层输入，形成第一次残差
   Tensor attn_out_flat =
       attn_out.ReshapeChecked({1, n_heads * head_dim}, "forward_layer attn_out");
@@ -363,6 +481,27 @@ static Tensor ComputeLogits(const Tensor& x, const MiniLlamaModel& model,
 // 位置推进和 token_history 维护交由 ForwardBatch 或直接调用方负责
 Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int token) {
   ValidateForwardInputs(ctx, model, token);
+  if (!ctx.cuda_kv_cache.empty()) {
+    if (!model.cuda_weights ||
+        ctx.cuda_kv_cache.device_id() != CudaDeviceId(model)) {
+      throw std::runtime_error(
+          "ForwardToken: resident GPU history requires matching CUDA weights");
+    }
+
+    for (int layer = 0; layer < model.config.n_layers; ++layer) {
+      const std::string prefix = "layers." + std::to_string(layer) + ".";
+      const auto& lw = model.layers[layer];
+      if (!FindCudaWeight(model, prefix + "wq", QuantType::kF32) ||
+          !FindCudaWeight(model, prefix + "wk", QuantType::kF32) ||
+          !FindCudaWeight(model, prefix + "wv", QuantType::kF32) ||
+          lw.wq.type != QuantType::kF32 || lw.wk.type != QuantType::kF32 ||
+          lw.wv.type != QuantType::kF32) {
+        throw std::runtime_error(
+            "ForwardToken: CUDA QKV snapshot changed; create a new context");
+      }
+    }
+  }
+
   // 不改变已有调用接口；各 Linear 按名称和类型查找常驻 F32 权重
   const ModelConfig& c = model.config;
   Tensor x = EmbedToken(model, token);
