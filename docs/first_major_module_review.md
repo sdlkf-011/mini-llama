@@ -201,7 +201,8 @@ Tokenizer 产生的 ID 必须能落入模型的 `[0, vocab_size)` 范围。
 
 ```text
 model         指向当前模型
-kv_cache      已计算 token 在各层产生的 K/V
+kv_cache      CPU 路径计算的 K/V
+cuda_kv_cache GPU 路径计算的 K/V（首次设备前向分配）
 pos           当前正在计算的位置
 token_history 已经真正送入前向计算的 token
 ```
@@ -300,7 +301,7 @@ Sampler 不知道文本、上下文或 EOS 的含义。EOS 判断由上层生成
 - 采样参数与累计统计。
 
 `RadixTree` 只回答“某个 token 序列在已登记序列中有多长的公共前缀”。真正的 K/V 数据仍在当前
-`MiniLlamaContext::kv_cache` 中。因此前缀树不是 KV Cache，也不能单独恢复一次推理状态。
+`MiniLlamaContext::kv_cache` 或 `cuda_kv_cache` 中。因此前缀树不是 KV Cache，也不能单独恢复一次推理状态。
 
 `Terminal` 只封装输入输出、提示符、流式 token 输出及 `/help`、`/stats` 等显示行为，使交互代码可以注入字符串流进行测试。
 
@@ -598,8 +599,10 @@ Forward 输出 logits，它们是未归一化分数。Sampler 根据温度和 To
 - 当前 F32 Linear 已支持多线程与 SIMD，CPU Attention 按 head 复用
   `ParallelFor()`，CLI 支持 `--threads`。三种量化 Linear 已支持 batch 与外层
   并行，Q8_0/Q4_0 可使用 NEON；Q4_1 点积为 scalar。Embedding 仍为 F32。
-- Backend/CUDA Runtime 与权重上传库接口已有实现，CLI CUDA 推理仍拒绝；
-  上传不改变 CPU 前向路径，CUDA 算子与 GPU Attention/KV Cache 未实现。
+- Backend/CUDA Runtime、完整设备前向与 GPU Attention/KV Cache 已接入。
+  CLI `generate/run/bench --backend cuda` 上传权重后执行 GPU 前向，仅最终
+  logits 下载给 CPU Sampler；无快照执行 CPU，损坏快照报错。`--quant q8_0|q4_0`
+  已接入三个推理命令；细节见[设备驻留 Decode](device_resident_cuda_decode.md)。
 - `MiniBatch` 内部仍逐 token 执行，不是并行 batch 推理。
 - 项目同时构建核心库、CLI 与测试，`main()` 只在可执行目标中启用。
 - Loader 不会根据 `TokenizerInfo` 自动实例化 tokenizer。

@@ -44,6 +44,11 @@ add_unit_test(mini-llama-cuda-tensor-tests cuda_tensor_test.cc "cuda_tensor.")
 add_unit_test(mini-llama-cuda-matmul-tests cuda_matmul_test.cc)
 add_unit_test(mini-llama-cuda-forward-linear-tests cuda_forward_linear_test.cc
               "cuda_forward_linear.")
+add_unit_test(mini-llama-cuda-forward-tests cuda_forward_test.cc "cuda_forward.")
+add_unit_test(mini-llama-cuda-forward-buffer-tests cuda_forward_buffer_test.cc
+              "cuda_forward_device_resident.")
+add_unit_test(mini-llama-cuda-forward-attention-tests cuda_forward_attention_test.cc
+              "cuda_forward_attention.")
 # 与文档中的直接运行路径一致；其余既有测试仍保留在 tests/
 set_target_properties(mini-llama-cuda-matmul-tests
   mini-llama-cuda-forward-linear-tests PROPERTIES
@@ -102,10 +107,10 @@ target_compile_definitions(mini-llama-chat-integration-tests
     MINI_LLAMA_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
-# 本阶段独立 CUDA Ops/Quant 测试，不包含后续设备前向模块
+# 独立 CUDA Ops/Quant 测试，与完整设备前向测试分别注册
 add_unit_test(mini-llama-cuda-quant-tests cuda_quant_test.cc)
 add_unit_test(mini-llama-cuda-ops-tests cuda_ops_test.cc "cuda_ops.")
 
-add_unit_test(mini-llama-cuda-kv-cache-tests test_cuda_kv_cache.cc "cuda_kv_cache.")
+add_unit_test(mini-llama-cuda-kv-cache-tests cuda_kv_cache_test.cc "cuda_kv_cache.")
 
 add_unit_test(mini-llama-cuda-attention-tests cuda_attention_test.cc "cuda_attention.")

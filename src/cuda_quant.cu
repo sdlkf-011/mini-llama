@@ -55,7 +55,9 @@ void ValidateHostStorage(const Tensor& tensor, const char* caller) {
 
 // bias 为 nullptr 表示省略；非空时必须是完整的 [out_features] 主机向量
 void ValidateBias(const Tensor* bias, int cols) {
-  if (!bias) return;
+  if (!bias) {
+    return;
+  }
   ValidateHostStorage(*bias, "CUDA quant bias");
   if (bias->shape != std::vector<int>{cols}) {
     throw std::runtime_error("CUDA quant bias: expected [out_features]");

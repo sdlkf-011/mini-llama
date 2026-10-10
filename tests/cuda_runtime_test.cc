@@ -249,15 +249,14 @@ TEST_F(CudaRuntimeGpuTest, QueriesRealDevicesAndRejectsInvalidIds) {
   EXPECT_FALSE(mini_llama::CudaBackendAvailable(device_count));
 }
 
-// 测试目的：验证 Runtime 可用但 CUDA 推理尚未接入时，CLI 报错并返回非零
-// 错误应发生在模型加载和生成之前，避免将 CPU 推理误报为 CUDA 执行
-TEST_F(CudaRuntimeGpuTest, RuntimeOnlyCliDoesNotFallbackToCpuInference) {
-  const char* argv[] = {"mini-llama", "generate", "--backend", "cuda"};
+// CUDA 校验通过后，模型加载错误仍必须明确失败，不执行 CPU 推理。
+TEST_F(CudaRuntimeGpuTest, CudaCliDoesNotFallbackOnMissingModel) {
+  const char* argv[] = {"mini-llama", "generate", "--backend",
+                        "cuda",       "--model",  "/missing-mini-llama-model"};
   std::istringstream input;
   std::ostringstream output, error;
-  EXPECT_EQ(mini_llama::RunMain(4, argv, input, output, error), 1);
-  EXPECT_NE(error.str().find("CUDA inference is not integrated yet"),
-            std::string::npos);
+  EXPECT_EQ(mini_llama::RunMain(6, argv, input, output, error), 1);
+  EXPECT_FALSE(error.str().empty());
   EXPECT_TRUE(output.str().empty());
   EXPECT_EQ(error.str().find("status=ok"), std::string::npos);
 }

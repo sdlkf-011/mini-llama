@@ -9,7 +9,7 @@ namespace mini_llama {
 
 // 单个 token 的前向传播
 // 返回 logits：[vocab_size]
-// 命中上传快照的 F32 Linear 使用 CUDA；其余算子和未命中/量化 Linear 使用 CPU
+// 存在 CUDA 权重快照时执行完整设备前向，仅下载最终 logits；否则使用 CPU
 Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int token);
 
 // 一批 token 的前向传播

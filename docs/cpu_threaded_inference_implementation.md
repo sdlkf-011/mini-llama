@@ -151,9 +151,13 @@ GQA、逐 token logits 和最终 KV Cache。浮点比较采用 `1e-5 * (1 + abs(
 
 此前多线程阶段的验证快照：全量 CTest 113/113，通过 `mini-llama-tests` 前缀
 筛选的 22 项全部通过；CLI 测试比较了 9 份 logits，结果为 `PASS`。
-最新量化与 batch 阶段针对 `ThreadedMatmulTest`、`QuantTest`、`ForwardTest` 的
+此前量化与 batch 阶段针对 `ThreadedMatmulTest`、`QuantTest`、`ForwardTest` 的
 24 项全部通过，未重新运行全量 CTest 或 CLI 测试。NEON 通过语法检查，ARM
 运行验证和性能基准仍未完成。
+
+`scripts/test_threaded_cli.py` 已注册为 `threaded-cli-smoke`，通过目标路径
+分别验证 CPU/CUDA 构建中的 CPU CLI；全量 CTest 会自动运行，无需手工补跑。
+本次全量验证结果见[CLI 同步说明](cli_integration_status.md#回归验证)。
 
 ## 当前边界与后续模块
 
@@ -165,9 +169,9 @@ Q8_0/Q4_0/Q4_1 继续按 `QuantType` 分发，不进入 `MatmulMode`。三种量
 均支持 `[in_features]` 和 `[batch, in_features]`，按输入行与输出通道展平任务。
 Q8_0/Q4_0 使用 NEON 或 scalar 即时解码点积，Q4_1 使用 scalar 点积，外层并行
 在两类路径中均有效。F32 Linear 的输入范围仍为单 token。
-完整 SIMD GEMM 与 AVX2 量化点积仍未实现。Backend/CUDA Runtime、权重上传与
-设备 Tensor 已有库实现；上传不切换 CPU 前向，CUDA 算子、CLI CUDA 推理和 GPU
-Attention/KV Cache 尚未完成，见 [CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
+完整 SIMD GEMM 与 AVX2 量化点积仍未实现。完整 CUDA 前向、CLI CUDA 推理与
+GPU Attention/KV Cache 已接入；本节线程调度只描述 CPU 路径，CUDA 执行见
+[CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
 
 [dispatch]: ../include/mini_llama/matmul_dispatch.h
 [quant]: ../include/mini_llama/quant.h

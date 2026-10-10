@@ -6,17 +6,17 @@
 本文同时记录随后完成的阶段文档同步与 Markdown 警告修复。
 
 本文是该提交阶段的历史记录，下面的“当前”指该阶段。此后的 cuBLAS F32
-混合前向和独立 CUDA Ops/Quant 已加入工作区；当前接入状态见
+混合前向、Ops/Quant、GPU Attention/KV Cache 和完整设备前向均已接入；当前状态见
 [README](../README.md)、[F32 Linear](cublas_f32_linear_implementation.md) 和
-[Ops/Quant 验证](cuda_ops_quant_implementation.md)，不应用历史描述覆盖这些实现。
+[设备驻留 Decode](device_resident_cuda_decode.md)，不应用历史描述覆盖这些实现。
 
-当前 `15643de`（`CUDA Kernels: Act, Quant, Upload`）阶段的完整总结见
+随后 `15643de`（`CUDA Kernels: Act, Quant, Upload`）阶段的完整总结见
 [CUDA 基础算子、量化 Linear 与上传调整](cuda_ops_quant_implementation.md)。
 该提交新增的 Ops/Quant Kernel 与已有上传入口的设备选择、空稠密权重处理、
 共享所有权回归在那里记录；本文的 CudaTensor、快照和整模型量化属于此前实现。
 
 该阶段结果是可验证的设备存储与模型上传能力。当时 CUDA 算子、GPU Attention、
-GPU KV Cache 和设备驻留 decode 属于后续实现；完整设备前向目前仍未接入。
+GPU KV Cache 和设备驻留 decode 属于后续实现；它们现在已经接入并通过单 GPU 验证。
 后端参数与 Runtime 的完整约定见
 [后端与 CUDA Runtime 说明](backend_selection_cuda_runtime_implementation.md)。
 

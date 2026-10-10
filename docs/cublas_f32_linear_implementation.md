@@ -1,14 +1,20 @@
-# cuBLAS F32 Matmul / Linear
+# cuBLAS F32 Matmul / Linear（历史阶段）
+
+> 本文主体记录 F32 混合前向阶段，下面的“当前”指该阶段；测试数字与计时
+> 保留历史意义。现在 Ops/Quant、GPU Attention/KV Cache、完整设备前向及
+> CLI CUDA 推理均已接入，快照不完整时报错。当前链路与验收见
+> [设备驻留 CUDA Decode](device_resident_cuda_decode.md)和
+> [CLI 同步说明](cli_integration_status.md)。
 
 本阶段补齐已有 CUDA Linear 草稿的公共接口，复用 `Tensor`、`CudaTensor`、
 `CudaDeviceBuffer`、设备选择、模型上传快照与运行统计。CPU 构建有明确的异常
 stub，不依赖 CUDA Toolkit。CUDA 构建链接 `CUDA::cudart` 和 `CUDA::cublas`。
 
-**模型前向仍是 CUDA F32 Linear 与 CPU 辅助算子的混合路径。** 当前工作区另有
+**本阶段模型前向是 CUDA F32 Linear 与 CPU 辅助算子的混合路径。** 当时工作区另有
 独立 `cuda_ops` 的 RMSNorm、RoPE、SiLU、逐元素加乘，以及 `cuda_quant` 的
 Q8_0/Q4_0/Q4_1 Linear；它们尚未接入模型前向。设备 Attention、CUDA KV Cache
 和完整设备驻留 decode 未实现。本模块不扩展 Attention，也不声称中间激活全程在 GPU。
-新增算子的当前验证结果见[本阶段记录](cuda_ops_quant_implementation.md)，
+随后独立算子的阶段验证结果见[Ops/Quant 记录](cuda_ops_quant_implementation.md)，
 本文下方的数值与时间保留为 F32 模块当时的回归快照。
 
 ## 修改文件
@@ -122,7 +128,7 @@ embedding/final_norm/各层 norm。bias 会增加上传项，但不增加 Linear
 ForwardBatch 当前逐 token 调用 ForwardToken，所以多 token 的调用数成倍增加。
 初始化和权重上传完成后重置统计；Prefill 后再次重置，以独立验证 Decode。
 
-| 单 token 两层模型 | 完整 GPU 链路验收目标 | 当前 CPU fallback 路径 |
+| 单 token 两层模型 | 当时的完整 GPU 链路验收目标 | 当时 CPU fallback 路径 |
 | --- | --- | --- |
 | 上传总数 / F32 Linear 数 | 21 / 15 | 21 / 15 |
 | CUDA Linear calls | 15 | 15 |
@@ -130,7 +136,7 @@ ForwardBatch 当前逐 token 调用 ForwardToken，所以多 token 的调用数�
 | CPU Attention fallbacks | 0 | 2 |
 | H2D / D2H copies | 0 / 1 | 15 / 15 |
 
-完整设备链路的验收目标保持不变。当前集成测试明确测试 fallback 边界，其通过
+完整设备链路的验收目标保持不变。当时集成测试明确测试 fallback 边界，其通过
 不能证明 0 H2D / 1 D2H 或激活常驻 GPU；这些目标等待已有 CUDA 依赖接入。
 
 ## 验证
@@ -175,6 +181,6 @@ attention_cpu_fallbacks=2, H2D=15, D2H=15
 传输均为两倍，Decode 前重置运行统计。上传快照对象、每项设备权重指针和
 上传总数保持不变；CPU 投影副本置零后，Decode 仍与原模型 Golden 一致。
 
-尚未完成完整设备 Forward 验收：CUDA Attention=2、H2D=0、D2H=1 以及
+当时尚未完成完整设备 Forward 验收：CUDA Attention=2、H2D=0、D2H=1 以及
 中间激活全程 GPU 常驻需要仓库缺失的 CUDA 辅助算子和 KV Cache/Attention
 依赖。本次未扩展 Attention，也未更改这些验收目标。

@@ -64,10 +64,6 @@ class BackendCliTest(unittest.TestCase):
         if self.diagnostics.returncode or self.gpu_count == 0:
             self.skipTest("CUDA device unavailable; GPU inference was not executed: "
                           + (self.diagnostics.stderr.strip() or "GPU count is zero"))
-        probe = invoke("generate", "--model", "missing-model", "--backend", "cuda")
-        if "CUDA inference is not integrated yet" in probe.stderr:
-            self.skipTest("CUDA Runtime is available; CUDA inference was not integrated "
-                          "or executed")
 
     def check_cpu(self, result):
         self.assertIn("backend: cpu\ncompute: cpu\n", result.stdout)
@@ -80,6 +76,16 @@ class BackendCliTest(unittest.TestCase):
         self.assertIsNotNone(compute, result.stdout)
         self.assertIn("cuda", compute.group(1).lower())
         self.assertIn("backend=cuda", result.stdout + result.stderr)
+
+    def check_chat(self, result, turns):
+        # 聊天允许单轮失败后继续交互，退出码为零不能证明每轮推理成功。
+        self.assertNotIn("Error:", result.stdout)
+        self.assertNotIn("status=error", result.stdout + result.stderr)
+        summaries = re.findall(r"^trace summary: .* mode=run status=ok .*"
+                               r"generated_tokens=([0-9]+)",
+                               result.stdout, re.MULTILINE)
+        self.assertEqual(len(summaries), turns, result.stdout)
+        self.assertTrue(all(int(count) > 0 for count in summaries), result.stdout)
 
     def test_default_cpu_without_visible_devices(self):
         result = self.success("generate", "--n-predict", "4", "--threads", "1",
@@ -101,10 +107,18 @@ class BackendCliTest(unittest.TestCase):
         self.assertIn("tokens/s (Decode):", result.stdout)
         self.assertIn("decode tokens: 3", result.stdout)
 
+    def test_bench_default_budget_matches_help(self):
+        help_output = self.success("bench", "--help").stdout
+        self.assertIn("default: 16; 0 = prefill only", help_output)
+        bench = self.success("bench", MODEL, "--threads", "1")
+        self.assertIn("generated tokens: 16\n", bench.stdout)
+        self.assertIn("decode tokens: 15\n", bench.stdout)
+
     def test_run_cpu_and_terminal_compatibility(self):
         result = self.success("run", MODEL, "--backend", "cpu", "--threads", "1",
                               "-n", "2", text="hello\n/params\n/clear\n/exit\n")
         self.check_cpu(result)
+        self.check_chat(result, 1)
         self.assertIn("Session cleared.", result.stdout)
         self.assertIn("Bye.", result.stdout)
 
@@ -198,6 +212,26 @@ class BackendCliTest(unittest.TestCase):
         self.assertIn("GGUF version=", self.success("inspect-gguf", MODEL / "model.gguf").stdout)
         for command in ("generate", "run", "bench", "inspect"):
             self.assertIn("--backend", self.success(command, "--help").stdout)
+        for command in ("generate", "run", "bench"):
+            self.assertIn("--quant", self.success(command, "--help").stdout)
+
+    def check_resident_counters(self, result):
+        # CLI 按指定输出口径累计 Prefill + Decode，与 trace 中真实 Forward 次数对照。
+        summary = re.search(r"trace summary: .* prefill_tokens=([0-9]+) "
+                            r"decode_tokens=([0-9]+)", result.stderr)
+        self.assertIsNotNone(summary, result.stderr)
+        forwards = int(summary.group(1)) + int(summary.group(2))
+        fields = {label: int(re.search(re.escape(label) + r": ([0-9]+)",
+                                       result.stdout).group(1))
+                  for label in ("cuda Linear calls", "cuda activation calls",
+                                "cuda attention calls", "cpu attention fallback calls")}
+        self.assertEqual(fields["cuda Linear calls"], forwards * 15)
+        self.assertEqual(fields["cuda activation calls"], forwards * 15)
+        self.assertEqual(fields["cuda attention calls"], forwards * 2)
+        self.assertEqual(fields["cpu attention fallback calls"], 0)
+        self.assertIn("host->device copies: 0 (0 bytes)", result.stdout)
+        self.assertIn(f"device->host copies: {forwards} ({forwards * 512} bytes)",
+                      result.stdout)
 
     def test_cuda_generate_logits_match_cpu(self):
         self.require_gpu()
@@ -212,6 +246,7 @@ class BackendCliTest(unittest.TestCase):
                 result = self.success(*args)
                 if backend == "cuda":
                     self.check_gpu(result)
+                    self.check_resident_counters(result)
             cpu_files = sorted(paths[0].glob("logits_step*.bin"))
             self.assertGreater(len(cpu_files), 1, "must execute prefill and decode")
             self.assertEqual([p.name for p in cpu_files],
@@ -230,11 +265,45 @@ class BackendCliTest(unittest.TestCase):
 
     def test_cuda_bench_and_run(self):
         self.require_gpu()
-        self.check_gpu(self.success("bench", MODEL, "--backend", "cuda", "--device", "0",
-                                    "-n", "4", "--threads", "1"))
-        self.check_gpu(self.success("run", MODEL, "--backend", "cuda", "--device", "0",
-                                    "-n", "2", "--threads", "1", "--prompt", "hello",
-                                    text="/clear\nhello\n/exit\n"))
+        bench = self.success("bench", MODEL, "--backend", "cuda", "--device", "0",
+                             "-n", "4", "--threads", "1")
+        self.check_gpu(bench)
+        self.check_resident_counters(bench)
+        chat = self.success("run", MODEL, "--backend", "cuda", "--device", "0",
+                            "-n", "2", "--threads", "1", "--prompt", "hello",
+                            text="again\n/clear\nhello\n/exit\n")
+        self.check_gpu(chat)
+        self.check_chat(chat, 3)
+        self.assertIn("Session cleared.", chat.stdout)
+        self.assertNotRegex(chat.stdout, r"cpu attention fallback calls: [1-9]")
+
+    def test_quant_overrides_generate_and_bench(self):
+        for quant in ("q8_0", "q4_0"):
+            self.success("generate", MODEL, "--quant", quant, "-n", "2", "--seed", "1")
+            bench = self.success("bench", MODEL, "--quant", quant, "-n", "2", "--seed", "1")
+            self.assertIn("logits error vs model-native:", bench.stdout)
+            chat = self.success("run", MODEL, "--quant", quant, "-n", "2",
+                                "--seed", "1", text="hello\n/exit\n")
+            self.check_cpu(chat)
+            self.check_chat(chat, 1)
+        self.failure("generate", "--model", "missing-model", "--quant", "unknown",
+                     contains="unsupported quant type")
+        if self.cuda_built and self.gpu_count:
+            for quant in ("q8_0", "q4_0"):
+                result = self.success("generate", MODEL, "--backend", "cuda",
+                                      "--quant", quant, "-n", "2", "--seed", "1")
+                self.check_resident_counters(result)
+                self.assertIn(f"cuda {quant} Linear weights: 15/15", result.stdout)
+                bench = self.success("bench", MODEL, "--backend", "cuda",
+                                     "--quant", quant, "-n", "2", "--seed", "1")
+                self.check_gpu(bench)
+                self.check_resident_counters(bench)
+                self.assertIn("logits error vs model-native:", bench.stdout)
+                chat = self.success("run", MODEL, "--backend", "cuda",
+                                    "--quant", quant, "-n", "2", "--seed", "1",
+                                    text="hello\n/exit\n")
+                self.check_gpu(chat)
+                self.check_chat(chat, 1)
 
     def test_cuda_invalid_selected_device(self):
         self.require_gpu()

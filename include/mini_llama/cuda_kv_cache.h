@@ -41,7 +41,7 @@ class CudaKvCache {
   // 校验层和位置后执行 Host-to-Device 拷贝
   void Write(int layer, int pos, const Tensor& k, const Tensor& v);
 
-  // 设备写入要求相同的二维形状、元素数、字节数和 device_id
+  // 设备写入接受 [n_kv_heads, head_dim] 或等元素数扁平向量，容量和设备须匹配
   // 仅执行 Device-to-Device 拷贝，不下载 K/V
   void WriteDevice(int layer, int pos, const CudaTensor& k, const CudaTensor& v);
 

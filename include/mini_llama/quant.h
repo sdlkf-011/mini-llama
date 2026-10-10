@@ -28,7 +28,8 @@ Tensor DequantizeFromQ41(const std::vector<BlockQ41>& blocks,
 
 // 权重保持量化块存储，点积时逐块即时反量化，不分配完整 F32 权重
 // 以下三种 Linear 均支持 [in_features] 或 [batch, in_features] 输入。
-// 权重为 [out_features, in_features]，输出为 [out_features] 或 [batch, out_features]。
+// 权重为 [out_features, in_features]，输出为 [out_features] 或 [batch,
+// out_features]。
 Tensor LinearQ80(const Tensor& input, const std::vector<BlockQ80>& weight,
                  const std::vector<int>& weight_shape);
 

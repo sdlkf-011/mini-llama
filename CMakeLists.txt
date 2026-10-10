@@ -98,6 +98,14 @@ if(BUILD_TESTING)
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
   set_tests_properties(backend-cli-smoke PROPERTIES TIMEOUT 180)
+  add_test(
+    NAME threaded-cli-smoke
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/scripts/test_threaded_cli.py
+            --binary $<TARGET_FILE:mini-llama>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(threaded-cli-smoke PROPERTIES TIMEOUT 180)
   add_test(NAME golden-logits
     COMMAND ${CMAKE_COMMAND} -E env
       "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"

@@ -52,7 +52,9 @@ class CudaGpuTest : public ::testing::Test {
 
 // 现有 CPU Linear 只支持向量或单行，逐行复用它生成批量 Golden。
 Tensor CpuLinearReference(const Tensor& x, const Tensor& weight) {
-  if (x.num_dims() == 1) return Linear(x, weight);
+  if (x.num_dims() == 1) {
+    return Linear(x, weight);
+  }
   Tensor result({x.shape[0], weight.shape[0]});
   for (int row = 0; row < x.shape[0]; ++row) {
     Tensor input({x.shape[1]});
@@ -70,7 +72,9 @@ using cuda_linear = CudaGpuTest;
 // 此用例不需要 GPU，防止未构建 CUDA 时静默执行或假装计算成功
 TEST(CudaMatmulBuildTest, CpuStubRejectsAllComputeEntrypoints) {
   EXPECT_EQ(CudaMatmulBuilt(), CudaRuntimeBuilt());
-  if (CudaMatmulBuilt()) GTEST_SKIP() << "CPU stub requires CUDA=OFF";
+  if (CudaMatmulBuilt()) {
+    GTEST_SKIP() << "CPU stub requires CUDA=OFF";
+  }
   Tensor x({3}), w({4, 3});
   EXPECT_THROW(CudaMatmul(w, Tensor({3, 2})), std::runtime_error);
   EXPECT_THROW(CudaLinear(x, w), std::runtime_error);

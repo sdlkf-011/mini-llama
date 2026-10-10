@@ -8,7 +8,9 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -65,8 +67,6 @@ std::string LoadChatTemplateFromGguf(const std::string& gguf_path) {
   return {};
 }
 
-namespace {
-
 // ----------------------------------------------
 // 参数解析与命令帮助
 // ----------------------------------------------
@@ -85,9 +85,62 @@ struct CommandOptions {
   int n_threads = -1;  // 未指定时保留当前配置；0 表示自动线程数
   SamplingParams sampling;
   std::string dump_logits_dir;
+  std::string quant_type;
   bool verbose = false;
   BackendConfig backend;
 };
+
+// 数值转换完整消费字符串；错误在模型加载前拒绝
+static bool ParseIntArg(const char* text, int& value) {
+  if (!text || text[0] == '\0' || text[0] == '-' || text[0] == ' ') {
+    return false;
+  }
+  char* end = nullptr;
+  errno = 0;
+  const int64_t parsed = std::strtoll(text, &end, 10);
+  if (end == text || *end != '\0' || errno == ERANGE || parsed < 0 ||
+      parsed > 1000000) {
+    return false;
+  }
+  value = static_cast<int>(parsed);
+  return true;
+}
+
+static bool ParseFloatArg(const char* text, float& value) {
+  char* end = nullptr;
+  errno = 0;
+  const double parsed = std::strtod(text, &end);
+  if (end == text || *end != '\0' || errno == ERANGE || !std::isfinite(parsed) ||
+      parsed < 0.0 || parsed > 10000.0) {
+    return false;
+  }
+  value = static_cast<float>(parsed);
+  return true;
+}
+
+static bool ParseUintArg(const char* text, unsigned int& value) {
+  if (!text || text[0] == '-' || text[0] == '\0' || text[0] == ' ') {
+    return false;
+  }
+  char* end = nullptr;
+  errno = 0;
+  const uint64_t parsed = std::strtoull(text, &end, 10);
+  if (end == text || *end != '\0' || errno == ERANGE ||
+      parsed > std::numeric_limits<unsigned int>::max()) {
+    return false;
+  }
+  value = static_cast<unsigned int>(parsed);
+  return true;
+}
+
+static bool ParseBackendArg(const char* text, BackendConfig& config) {
+  BackendKind kind;
+  if (!ParseBackendKind(text, kind)) {
+    return false;
+  }
+  config.kind = kind;
+  return true;
+}
 
 // 使用 from_chars 拒绝负号、空白、尾随字符和溢出；不限制合法 seed 的范围
 template <typename Integer>
@@ -103,62 +156,65 @@ Integer ParseInteger(const std::string& text, const std::string& option) {
 }
 
 // 为 token 数和 top-k 增加命令行范围约束；随机种子单独使用无符号解析
-int ParseIntArg(const std::string& text, const std::string& option) {
-  const int value = ParseInteger<int>(text, option);
-  if (value > 1000000) {
-    throw std::invalid_argument(option + " must be between 0 and 1000000");
+static int ParseIntArg(const std::string& text, const std::string& option) {
+  int value = 0;
+  if (!ParseIntArg(text.c_str(), value)) {
+    throw std::invalid_argument("invalid value for " + option + ": " + text);
   }
   return value;
 }
 
-void ParseBackendArg(const std::string& text, BackendConfig& config) {
-  if (!ParseBackendKind(text, config.kind)) {
+static void ParseBackendArg(const std::string& text, BackendConfig& config) {
+  if (!ParseBackendArg(text.c_str(), config)) {
     throw std::invalid_argument("invalid --backend: " + text +
                                 "; expected cpu or cuda");
   }
 }
 
-void ParseDeviceArg(const std::string& text, BackendConfig& config) {
+// 设备编号按 int 全范围解析，由 Runtime 判断设备是否存在
+static bool ParseDeviceArg(const char* text, BackendConfig& config) {
+  int value = 0;
+  const auto end = text + std::strlen(text);
+  const auto result = std::from_chars(text, end, value);
+  if (result.ec != std::errc() || result.ptr != end || text == end || value < 0) {
+    return false;
+  }
+  config.device_id = value;
+  config.device_id_set = true;
+  return true;
+}
+
+static void ParseDeviceArg(const std::string& text, BackendConfig& config) {
   if (config.device_id_set) {
     throw std::invalid_argument("duplicate option: --device");
   }
-  // 复用严格整数解析，不使用 token 数选项的 1000000 上限。
-  int device_id = 0;
-  try {
-    device_id = ParseInteger<int>(text, "--device");
-  } catch (const std::invalid_argument&) {
+  if (!ParseDeviceArg(text.c_str(), config)) {
     throw std::invalid_argument("invalid --device: " + text +
                                 "; expected a non-negative integer GPU ID");
   }
-  config.device_id = device_id;
-  config.device_id_set = true;
 }
 
 // 温度必须是有限的非负数；范围错误在转换为 float 前检查
-float ParseFloatArg(const std::string& text, const std::string& option) {
-  char* end = nullptr;
-  // 清除上次转换遗留的 errno，只判断本次 strtod 是否发生范围错误
-  errno = 0;
-  const double value = std::strtod(text.c_str(), &end);
-  if (end == text.c_str() || *end != '\0' || errno == ERANGE ||
-      !std::isfinite(value) || value < 0.0 || value > 10000.0) {
+static float ParseFloatArg(const std::string& text, const std::string& option) {
+  float value = 0.0f;
+  if (!ParseFloatArg(text.c_str(), value)) {
     throw std::invalid_argument("invalid value for " + option + ": " + text);
   }
-  return static_cast<float>(value);
+  return value;
 }
 
 // 生成类命令共用采样选项，检查类命令只接受资源路径和帮助选项
-bool IsGenerationCommand(const std::string& command) {
+static bool IsGenerationCommand(const std::string& command) {
   return command == "generate" || command == "run";
 }
 
 // 需要模型、分词器和 prompt 的命令共用资源及基础推理参数
-bool IsInferenceCommand(const std::string& command) {
+static bool IsInferenceCommand(const std::string& command) {
   return IsGenerationCommand(command) || command == "bench";
 }
 
 // 诊断使用统一 Runtime 接口；错误写入注入的流，保持 CLI 的非零退出约定。
-int RunCudaInfo(std::ostream& output, std::ostream& error) {
+static int RunCudaInfo(std::ostream& output, std::ostream& error) {
   output << "CUDA backend built: " << (CudaRuntimeBuilt() ? "yes" : "no") << '\n';
   try {
     const int count = CudaDeviceCount();
@@ -176,17 +232,198 @@ int RunCudaInfo(std::ostream& output, std::ostream& error) {
   }
 }
 
-// Runtime 可用不代表推理算子已经迁移；保留后续 CUDA 推理模块的接入边界
-void ValidateInferenceBackend(const BackendConfig& config) {
-  ValidateBackend(config);
-  if (config.kind == BackendKind::kCuda) {
-    throw std::runtime_error(
-        "CUDA Runtime is available, but CUDA inference is not integrated yet.");
+// 后端校验只报告实际错误，CUDA 配置失败时不执行 CPU 推理
+static bool ValidateBackendOrPrint(const BackendConfig& config,
+                                   std::ostream& error = std::cerr) {
+  try {
+    ValidateBackend(config);
+    return true;
+  } catch (const std::exception& e) {
+    error << "Backend setup failed: " << e.what() << '\n';
+    return false;
   }
 }
 
+static void PrintBackendInfo(const BackendConfig& config,
+                             std::ostream& out = std::cout) {
+  out << "backend: " << BackendKindName(config.kind) << '\n';
+  out << BackendExecutionNote(config) << '\n';
+  if (config.kind == BackendKind::kCuda) {
+    out << "cuda: " << CudaDeviceSummary(config.device_id) << '\n';
+  }
+}
+
+static std::string FormatMb(size_t bytes) {
+  std::ostringstream out;
+  out << std::fixed << std::setprecision(2)
+      << static_cast<double>(bytes) / (1024.0 * 1024.0) << " MB";
+  return out.str();
+}
+
+// 权重准备单独完成，失败保留原设备快照并给出上传阶段诊断
+static bool PrepareCudaWeightsOrPrint(MiniLlamaModel& model,
+                                      const BackendConfig& config,
+                                      std::ostream& error = std::cerr) {
+  if (config.kind != BackendKind::kCuda) {
+    return true;
+  }
+  try {
+    UploadModelWeightsToCuda(model, config.device_id);
+    return true;
+  } catch (const std::exception& e) {
+    error << "CUDA weight upload failed: " << e.what() << '\n';
+    return false;
+  }
+}
+
+static void PrintCudaWeightSummary(const MiniLlamaModel& model,
+                                   const std::string& indent = "",
+                                   std::ostream& out = std::cout) {
+  out << indent << "uploaded weights: " << ModelCudaUploadedWeightCount(model)
+      << '\n';
+  out << indent << "gpu memory used: " << ModelCudaMemoryBytes(model) << " bytes ("
+      << FormatMb(ModelCudaMemoryBytes(model)) << ")\n";
+}
+
+// 分类型统计只包含 Linear；稠密 Embedding/Norm/Bias 另计上传总量
+struct LinearWeightTypeCounts {
+  size_t f32 = 0;
+  size_t q8_0 = 0;
+  size_t q4_0 = 0;
+  size_t q4_1 = 0;
+  size_t total() const { return f32 + q8_0 + q4_0 + q4_1; }
+  size_t quantized() const { return q8_0 + q4_0 + q4_1; }
+};
+
+static void CountLinearWeight(const QuantizedTensor& weight,
+                              LinearWeightTypeCounts& counts) {
+  switch (weight.type) {
+    case QuantType::kF32:
+      ++counts.f32;
+      return;
+    case QuantType::kQ80:
+      ++counts.q8_0;
+      return;
+    case QuantType::kQ40:
+      ++counts.q4_0;
+      return;
+    case QuantType::kQ41:
+      ++counts.q4_1;
+      return;
+  }
+  throw std::runtime_error("unknown Linear weight type");
+}
+
+static LinearWeightTypeCounts ModelLinearWeightTypeCounts(
+    const MiniLlamaModel& model) {
+  LinearWeightTypeCounts counts;
+  CountLinearWeight(model.lm_head, counts);
+  for (const auto& lw : model.layers) {
+    for (const auto* w :
+         {&lw.wq, &lw.wk, &lw.wv, &lw.wo, &lw.w_gate, &lw.w_up, &lw.w_down}) {
+      CountLinearWeight(*w, counts);
+    }
+  }
+  return counts;
+}
+
+static void PrintCudaExecutionSummary(const MiniLlamaModel& model,
+                                      const std::string& indent = "",
+                                      std::ostream& out = std::cout) {
+  PrintCudaWeightSummary(model, indent, out);
+  const auto counts = ModelLinearWeightTypeCounts(model);
+  out << indent
+      << "cuda f32 Linear weights: " << ModelCudaUploadedF32WeightCount(model) << "/"
+      << counts.total() << '\n';
+  if (counts.q8_0 > 0) {
+    out << indent
+        << "cuda q8_0 Linear weights: " << ModelCudaUploadedQ80WeightCount(model)
+        << "/" << counts.q8_0 << '\n';
+  }
+  if (counts.q4_0 > 0) {
+    out << indent
+        << "cuda q4_0 Linear weights: " << ModelCudaUploadedQ40WeightCount(model)
+        << "/" << counts.q4_0 << '\n';
+  }
+  if (counts.q4_1 > 0) {
+    out << indent
+        << "cuda q4_1 Linear weights: " << ModelCudaUploadedQ41WeightCount(model)
+        << "/" << counts.q4_1 << '\n';
+  }
+
+  // 缺失量化权重会在 Forward 明确报错，不将其显示为可用的 CPU 回退
+  if (ModelCudaUploadedF32WeightCount(model) +
+          ModelCudaUploadedQ80WeightCount(model) +
+          ModelCudaUploadedQ40WeightCount(model) +
+          ModelCudaUploadedQ41WeightCount(model) !=
+      counts.total()) {
+    out << indent << "cuda weights incomplete: CUDA forward will report an error\n";
+  }
+}
+
+// 执行摘要累计当前推理的 Prefill + Decode，不包含模型权重上传
+static void PrintCudaRuntimeSummary(const MiniLlamaModel& model,
+                                    const std::string& indent = "",
+                                    std::ostream& out = std::cout) {
+  out << indent << "cuda Linear calls: " << ModelCudaLinearCalls(model) << '\n';
+  out << indent << "cuda activation calls: " << ModelCudaActivationCalls(model)
+      << '\n';
+  out << indent << "cuda attention calls: " << ModelCudaAttentionCalls(model)
+      << '\n';
+  out << indent
+      << "cpu attention fallback calls: " << ModelCudaAttentionCpuFallbacks(model)
+      << '\n';
+  out << indent << "cuda kv write bytes: " << ModelCudaKvCacheWriteBytes(model)
+      << '\n';
+  out << indent << "cuda kv read bytes: " << ModelCudaKvCacheReadBytes(model)
+      << '\n';
+  out << indent << "host->device copies: " << ModelCudaHostToDeviceCopies(model)
+      << " (" << ModelCudaHostToDeviceBytes(model) << " bytes)\n";
+  out << indent << "device->host copies: " << ModelCudaDeviceToHostCopies(model)
+      << " (" << ModelCudaDeviceToHostBytes(model) << " bytes)\n";
+}
+
+// 显式覆盖只转换 Linear，Embedding、Norm 和 Bias 保持原有 F32 格式
+static void ApplyQuantOverride(MiniLlamaModel& model,
+                               const std::string& quant_type) {
+  if (quant_type.empty()) {
+    return;
+  }
+  if (quant_type == "q8_0") {
+    QuantizeModelToQ80(model);
+    return;
+  }
+  if (quant_type == "q4_0") {
+    QuantizeModelToQ40(model);
+    return;
+  }
+  throw std::runtime_error("unsupported quant type: " + quant_type);
+}
+
+static Tensor RunLogitsForTokens(const MiniLlamaModel& model,
+                                 const std::vector<int>& tokens) {
+  MiniLlamaContext ctx(&model);
+  return ForwardBatch(ctx, model, MiniBatch::FromTokens(tokens, 0));
+}
+
+static std::pair<float, float> LogitsError(const Tensor& baseline,
+                                           const Tensor& candidate) {
+  if (baseline.shape != candidate.shape || baseline.size() != candidate.size() ||
+      baseline.size() == 0) {
+    throw std::runtime_error("LogitsError: shape/storage mismatch");
+  }
+  float max_error = 0.0f;
+  double sum_error = 0.0;
+  for (size_t i = 0; i < baseline.size(); ++i) {
+    const float error = std::abs(baseline.data[i] - candidate.data[i]);
+    max_error = std::max(max_error, error);
+    sum_error += error;
+  }
+  return {max_error, static_cast<float>(sum_error / baseline.size())};
+}
+
 // 全局帮助只列出当前已接入的命令，具体参数交给对应命令帮助说明
-void PrintGlobalUsage(const char* prog, std::ostream& out) {
+static void PrintGlobalUsage(const char* prog, std::ostream& out) {
   out << "Usage: " << prog << " <command> [options]\n"
       << "Commands:\n"
       << "  generate      One-shot text generation\n"
@@ -199,8 +436,8 @@ void PrintGlobalUsage(const char* prog, std::ostream& out) {
 }
 
 // 按命令输出有效选项和默认值；查看帮助不需要加载任何模型资源
-void PrintCommandUsage(const char* prog, const std::string& command,
-                       std::ostream& out) {
+static void PrintCommandUsage(const char* prog, const std::string& command,
+                              std::ostream& out) {
   if (command == "inspect-gguf") {
     // 原始 GGUF 检查只需要文件路径，不涉及分词器或生成参数
     out << "Usage: " << prog << " inspect-gguf <path>\n";
@@ -246,6 +483,7 @@ void PrintCommandUsage(const char* prog, const std::string& command,
       out << "  --verbose             Print logits and KV cache details\n";
     }
 
+    out << "  --quant q8_0|q4_0     Quantize Linear weights before inference\n";
     if (command == "generate") {
       out << "  --dump-logits <dir>   Dump step logits and generation_tokens.txt\n"
           << "                        Token-by-token prefill; steps start at 0\n"
@@ -256,8 +494,8 @@ void PrintCommandUsage(const char* prog, const std::string& command,
 }
 
 // 每个选项只消费自己的值，避免把 prompt 内的 --help/--model 误当作选项
-CommandOptions ParseOptions(int argc, const char* const argv[],
-                            bool allow_resource_options) {
+static CommandOptions ParseOptions(int argc, const char* const argv[],
+                                   bool allow_resource_options) {
   CommandOptions options;
   bool backend_set = false;
   int start = 1;
@@ -350,8 +588,15 @@ CommandOptions ParseOptions(int argc, const char* const argv[],
     } else if (IsGenerationCommand(options.command) && option == "--top-k") {
       options.sampling.top_k = ParseIntArg(read_value(i, option), option);
     } else if (IsInferenceCommand(options.command) && option == "--seed") {
-      options.sampling.seed =
-          ParseInteger<unsigned int>(read_value(i, option), option);
+      const auto value = read_value(i, option);
+      if (!ParseUintArg(value.c_str(), options.sampling.seed)) {
+        throw std::invalid_argument("invalid value for " + option + ": " + value);
+      }
+    } else if (IsInferenceCommand(options.command) && option == "--quant") {
+      set_path(options.quant_type, i, option);
+      if (options.quant_type != "q8_0" && options.quant_type != "q4_0") {
+        throw std::invalid_argument("unsupported quant type: " + options.quant_type);
+      }
     } else if (options.command == "bench" && option == "--verbose") {
       options.verbose = true;
     } else if (options.command == "generate" && option == "--dump-logits") {
@@ -391,7 +636,7 @@ struct LoadedModel {
 };
 
 // 根据文件魔数判断格式，不能只依赖后缀
-bool IsGgufFile(const std::filesystem::path& path) {
+static bool IsGgufFile(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
   char magic[4] = {};
   // 魔数匹配仅用于格式分发，文件版本与数据完整性由 GGUF 加载器继续校验
@@ -399,7 +644,8 @@ bool IsGgufFile(const std::filesystem::path& path) {
 }
 
 // 扫描目录中的普通文件；无候选返回空路径，多个候选要求用户指定文件
-std::filesystem::path FindGgufInDirectory(const std::filesystem::path& directory) {
+static std::filesystem::path FindGgufInDirectory(
+    const std::filesystem::path& directory) {
   std::vector<std::filesystem::path> candidates;
   for (const auto& entry : std::filesystem::directory_iterator(directory)) {
     if (entry.is_regular_file() && IsGgufFile(entry.path())) {
@@ -416,7 +662,7 @@ std::filesystem::path FindGgufInDirectory(const std::filesystem::path& directory
 }
 
 // generate、run、inspect 共享资源解析；模型格式选择与执行命令解耦
-ModelPaths ResolveModelPaths(const CommandOptions& options) {
+static ModelPaths ResolveModelPaths(const CommandOptions& options) {
   namespace fs = std::filesystem;
   // --weights 是旧版二进制权重选项，不能与 --model 同时决定模型来源
   if (!options.model_path.empty() && !options.weights_path.empty()) {
@@ -436,6 +682,7 @@ ModelPaths ResolveModelPaths(const CommandOptions& options) {
       throw std::invalid_argument("missing model path");
     }
   }
+
   if (!fs::exists(paths.model)) {
     // inspect 可以只读取清单，model.bin 不必存在
     if (options.command == "inspect" && !paths.config.empty()) {
@@ -444,11 +691,13 @@ ModelPaths ResolveModelPaths(const CommandOptions& options) {
     throw std::invalid_argument("model path does not exist: " +
                                 paths.model.string());
   }
+
   if (fs::is_directory(paths.model)) {
     const fs::path directory = paths.model;
     if (paths.config.empty()) {
       paths.config = directory / "model.json";
     }
+
     // 目录中 JSON+BIN 配对完整时优先使用旧格式；inspect 仅要求清单存在
     if (fs::is_regular_file(paths.config) &&
         (fs::is_regular_file(directory / "model.bin") ||
@@ -487,7 +736,8 @@ ModelPaths ResolveModelPaths(const CommandOptions& options) {
 
 // 外部词表可指向目录或 vocab.json；有 merges.txt 时使用 BPE
 // 显式词表加载失败必须报错，不能由工厂的 ASCII 回退掩盖配置错误
-std::unique_ptr<ITokenizer> CreateTokenizerFromVocabHint(const std::string& hint) {
+static std::unique_ptr<ITokenizer> CreateTokenizerFromVocabHint(
+    const std::string& hint) {
   namespace fs = std::filesystem;
   fs::path vocab(hint);
   if (fs::is_directory(vocab)) {
@@ -516,10 +766,10 @@ std::unique_ptr<ITokenizer> CreateTokenizerFromVocabHint(const std::string& hint
   return std::make_unique<JsonVocabTokenizer>(vocab.string());
 }
 
-// JSON 清单与实际分词器必须采用相同的特殊 ID，避免 BOS、EOS 和 UNK 语义错位。
-// 显式替换词表只改变资源来源，仍须遵守模型清单声明的特殊 token 约定。
-void ValidateTokenizerSpecialIds(const TokenizerInfo& expected,
-                                 const ITokenizer& tokenizer) {
+// JSON 清单与实际分词器必须采用相同的特殊 ID，避免 BOS、EOS 和 UNK 语义错位
+// 显式替换词表只改变资源来源，仍须遵守模型清单声明的特殊 token 约定
+static void ValidateTokenizerSpecialIds(const TokenizerInfo& expected,
+                                        const ITokenizer& tokenizer) {
   const auto require_same_id = [](const char* name, int expected_id, int actual_id) {
     if (expected_id != actual_id) {
       throw std::runtime_error(std::string("tokenizer ") + name +
@@ -532,15 +782,15 @@ void ValidateTokenizerSpecialIds(const TokenizerInfo& expected,
   require_same_id("unk_id", expected.unk_id, tokenizer.unk_id());
 }
 
-// 按“显式指定、格式内元数据、同目录回退”的规则装配分词器，再校验清单约定。
-LoadedModel LoadModelAndTokenizer(const ModelPaths& paths,
-                                  const CommandOptions& options) {
+// 按“显式指定、格式内元数据、同目录回退”的规则装配分词器，再校验清单约定
+static LoadedModel LoadModelAndTokenizer(const ModelPaths& paths,
+                                         const CommandOptions& options) {
   if (!options.tokenizer_path.empty() && !options.vocab_path.empty()) {
     throw std::invalid_argument("--tokenizer and --vocab cannot be combined");
   }
 
-  // 先取得 JSON 清单，使自动选择和显式覆盖的分词器共用同一套 ID 校验。
-  // GGUF 分词器从文件元数据恢复特殊 ID，不使用 JSON 清单默认值。
+  // 先取得 JSON 清单，使自动选择和显式覆盖的分词器共用同一套 ID 校验
+  // GGUF 分词器从文件元数据恢复特殊 ID，不使用 JSON 清单默认值
   ModelManifest manifest;
   if (!paths.gguf) {
     manifest = ParseManifest(paths.config.string());
@@ -599,8 +849,9 @@ LoadedModel LoadModelAndTokenizer(const ModelPaths& paths,
 // ----------------------------------------------
 
 // 在分配上下文和运行采样前检查模型状态、参数以及词表容量的兼容性
-void ValidateGeneration(const MiniLlamaModel& model, const ITokenizer& tokenizer,
-                        int n_predict, const SamplingParams& sampling) {
+static void ValidateGeneration(const MiniLlamaModel& model,
+                               const ITokenizer& tokenizer, int n_predict,
+                               const SamplingParams& sampling) {
   if (!model.loaded) {
     throw std::invalid_argument("model is not loaded");
   }
@@ -615,9 +866,10 @@ void ValidateGeneration(const MiniLlamaModel& model, const ITokenizer& tokenizer
 }
 
 // 编码并校验输入长度；needs_response 决定是否必须为生成保留剩余位置
-std::vector<int> EncodePrompt(const MiniLlamaModel& model,
-                              const ITokenizer& tokenizer, const std::string& prompt,
-                              bool needs_response) {
+static std::vector<int> EncodePrompt(const MiniLlamaModel& model,
+                                     const ITokenizer& tokenizer,
+                                     const std::string& prompt,
+                                     bool needs_response) {
   std::vector<int> tokens = tokenizer.Encode(prompt);
   if (tokens.empty()) {
     // 空 prompt 使用合法 BOS；非空文本编码失败则明确报错
@@ -639,7 +891,7 @@ std::vector<int> EncodePrompt(const MiniLlamaModel& model,
 }
 
 // 先输出按记录顺序排列的事件，再输出摘要，便于脚本读取最终状态
-void PrintRequestTrace(const RequestContext& request, std::ostream& out) {
+static void PrintRequestTrace(const RequestContext& request, std::ostream& out) {
   for (const auto& line : FormatRequestTraceEvents(request)) {
     out << line << '\n';
   }
@@ -647,7 +899,7 @@ void PrintRequestTrace(const RequestContext& request, std::ostream& out) {
 }
 
 // 将整数序列统一格式化为方括号列表，供 token 结果和张量形状共用
-void PrintTokens(const std::vector<int>& tokens, std::ostream& out) {
+static void PrintTokens(const std::vector<int>& tokens, std::ostream& out) {
   out << '[';
   for (size_t i = 0; i < tokens.size(); ++i) {
     out << (i == 0 ? "" : ", ") << tokens[i];
@@ -656,8 +908,8 @@ void PrintTokens(const std::vector<int>& tokens, std::ostream& out) {
 }
 
 // 原始 token 与追踪保留 EOS，展示文本排除结束标记，延续既有库接口语义
-std::string DecodeGeneratedTokens(const ITokenizer& tokenizer,
-                                  const std::vector<int>& tokens) {
+static std::string DecodeGeneratedTokens(const ITokenizer& tokenizer,
+                                         const std::vector<int>& tokens) {
   if (!tokens.empty() && tokens.back() == tokenizer.eos_id()) {
     return tokenizer.Decode(std::vector<int>(tokens.begin(), tokens.end() - 1));
   }
@@ -665,7 +917,7 @@ std::string DecodeGeneratedTokens(const ITokenizer& tokenizer,
 }
 
 // 导出采用本机 float 二进制布局，与逐步 logits 对照工具保持一致
-void DumpLogits(const Tensor& logits, const std::filesystem::path& path) {
+static void DumpLogits(const Tensor& logits, const std::filesystem::path& path) {
   static_assert(sizeof(float) == 4, "logits dumps require float32");
   std::ofstream out(path, std::ios::binary);
   out.write(reinterpret_cast<const char*>(logits.data.data()),
@@ -678,8 +930,8 @@ void DumpLogits(const Tensor& logits, const std::filesystem::path& path) {
 }
 
 // 生成 ID 使用空格分隔的文本格式，包含 EOS，空结果也保留结尾换行
-void DumpGeneratedTokens(const std::vector<int>& tokens,
-                         const std::filesystem::path& path) {
+static void DumpGeneratedTokens(const std::vector<int>& tokens,
+                                const std::filesystem::path& path) {
   std::ofstream out(path);
   for (size_t i = 0; i < tokens.size(); ++i) {
     out << (i == 0 ? "" : " ") << tokens[i];
@@ -697,11 +949,11 @@ void DumpGeneratedTokens(const std::vector<int>& tokens,
 
 // 完成 tokenize、prefill、采样和 decode，返回原始生成 ID 并累加请求指标
 // require_full_budget 区分命令行的严格预算检查与既有库调用的截断语义
-std::vector<int> GenerateTokens(const MiniLlamaModel& model,
-                                const ITokenizer& tokenizer,
-                                const CommandOptions& options,
-                                RequestContext& request,
-                                bool require_full_budget = false) {
+static std::vector<int> GenerateTokens(const MiniLlamaModel& model,
+                                       const ITokenizer& tokenizer,
+                                       const CommandOptions& options,
+                                       RequestContext& request,
+                                       bool require_full_budget = false) {
   ValidateGeneration(model, tokenizer, options.n_predict, options.sampling);
 
   // 先编码输入再计算剩余窗口，token 数不能用 prompt 的字符数代替
@@ -797,12 +1049,14 @@ std::vector<int> GenerateTokens(const MiniLlamaModel& model,
 }
 
 // 命令行单轮生成入口：使用严格预算检查，并展示采样配置、原始 ID 与文本
-int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
-                RequestContext& request, std::ostream& output) {
+static int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
+                       RequestContext& request, std::ostream& output) {
+  if (loaded.model.cuda_weights) {
+    PrintCudaExecutionSummary(loaded.model, "", output);
+  }
   const auto generated =
       GenerateTokens(loaded.model, *loaded.tokenizer, options, request, true);
-  output << "backend: " << BackendKindName(options.backend.kind) << '\n'
-         << BackendExecutionNote(options.backend) << '\n';
+  PrintBackendInfo(options.backend, output);
   output << "mini-llama.cpp\n==============\n\n"
          << "threads: " << GetThreadCount() << '\n'
          << "prompt: " << options.prompt << '\n'
@@ -812,12 +1066,17 @@ int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
   PrintTokens(generated, output);
   output << "\ngenerated text: \""
          << DecodeGeneratedTokens(*loaded.tokenizer, generated) << "\"\n";
+  if (loaded.model.cuda_weights) {
+    output << "CUDA runtime (prefill + decode):\n";
+    PrintCudaRuntimeSummary(loaded.model, "", output);
+  }
   return 0;
 }
 
 // 执行独立基准测试，并把基准结果同步到请求追踪和命令行输出
-int RunBench(const LoadedModel& loaded, const CommandOptions& options,
-             RequestContext& request, std::ostream& output) {
+static int RunBench(const LoadedModel& loaded, const CommandOptions& options,
+                    RequestContext& request, std::ostream& output,
+                    const MiniLlamaModel* baseline_model = nullptr) {
   const auto tokenize_start = RequestClock::now();
   const std::vector<int> prompt = EncodePrompt(
       loaded.model, *loaded.tokenizer, options.prompt, options.n_predict > 0);
@@ -826,11 +1085,13 @@ int RunBench(const LoadedModel& loaded, const CommandOptions& options,
   request.RecordEvent("tokenize", request.tokenize_ms, request.prompt_tokens,
                       "benchmark_prompt");
 
+  if (loaded.model.cuda_weights) {
+    PrintCudaExecutionSummary(loaded.model, "  ", output);
+  }
   const BenchmarkResult result =
       RunBenchmark(loaded.model, prompt, options.n_predict, options.sampling.seed,
                    options.verbose, output);
-  output << "backend: " << BackendKindName(options.backend.kind) << '\n'
-         << BackendExecutionNote(options.backend) << '\n';
+  PrintBackendInfo(options.backend, output);
   request.prefill_tokens = result.n_prompt_tokens;
   request.generated_tokens = result.n_generated_tokens;
   request.decode_tokens = result.n_decode_tokens;
@@ -859,6 +1120,22 @@ int RunBench(const LoadedModel& loaded, const CommandOptions& options,
          << "decode throughput: " << result.decode_tokens_per_sec() << " tokens/s\n"
          << "tokens/s (total): " << result.tokens_per_sec() << '\n'
          << "tokens/s (Decode): " << result.decode_tokens_per_sec() << '\n';
+
+  if (loaded.model.cuda_weights) {
+    output << "  cuda runtime (prefill + decode):\n";
+    PrintCudaRuntimeSummary(loaded.model, "    ", output);
+  }
+  const size_t actual_bytes = ModelWeightBytes(loaded.model);
+  const size_t f32_bytes = ModelWeightBytesF32(loaded.model);
+  output << "  weight memory: actual=" << actual_bytes << " bytes ("
+         << FormatMb(actual_bytes) << "), f32 equiv=" << f32_bytes << " bytes\n";
+
+  if (baseline_model) {
+    const auto error = LogitsError(RunLogitsForTokens(*baseline_model, prompt),
+                                   RunLogitsForTokens(loaded.model, prompt));
+    output << "  logits error vs model-native: max=" << std::scientific
+           << error.first << ", mean=" << error.second << '\n';
+  }
   output.flags(old_flags);
   output.precision(old_precision);
   return 0;
@@ -869,7 +1146,8 @@ int RunBench(const LoadedModel& loaded, const CommandOptions& options,
 // ----------------------------------------------
 
 // 查找两个 token 序列从起点开始的相同部分，用于验证物理 KV Cache 的复用范围
-size_t CommonPrefixLength(const std::vector<int>& a, const std::vector<int>& b) {
+static size_t CommonPrefixLength(const std::vector<int>& a,
+                                 const std::vector<int>& b) {
   size_t i = 0;
   while (i < std::min(a.size(), b.size()) && a[i] == b[i]) {
     ++i;
@@ -879,9 +1157,9 @@ size_t CommonPrefixLength(const std::vector<int>& a, const std::vector<int>& b) 
 
 // 返回 true 表示输入已由终端命令消费；普通用户文本交给后续推理处理
 // /exit 通过 should_exit 通知外层循环退出，本函数不终止进程
-bool HandleCommand(const std::string& input, ChatSession& session,
-                   MiniLlamaContext& context, const MiniLlamaModel& model,
-                   const Terminal& terminal, bool& should_exit) {
+static bool HandleCommand(const std::string& input, ChatSession& session,
+                          MiniLlamaContext& context, const MiniLlamaModel& model,
+                          const Terminal& terminal, bool& should_exit) {
   if (input.empty() || input.front() != '/') {
     return false;
   }
@@ -907,11 +1185,11 @@ bool HandleCommand(const std::string& input, ChatSession& session,
 
 // 执行一轮会话：构建完整 prompt，只 prefill 缓存缺失后缀，再流式生成响应
 // 模型与采样器跨轮复用；request 只记录当前这一轮的耗时与 token 数
-void RunChatTurn(const std::string& input, const MiniLlamaModel& model,
-                 const ITokenizer& tokenizer, const CommandOptions& options,
-                 const PromptBuilder& builder, Terminal& terminal,
-                 ChatSession& session, MiniLlamaContext& context,
-                 MiniSampler& sampler, RequestContext& request) {
+static void RunChatTurn(const std::string& input, const MiniLlamaModel& model,
+                        const ITokenizer& tokenizer, const CommandOptions& options,
+                        const PromptBuilder& builder, Terminal& terminal,
+                        ChatSession& session, MiniLlamaContext& context,
+                        MiniSampler& sampler, RequestContext& request) {
   // 先在副本中追加用户消息，正常完成生成后再提交到会话历史
   auto candidate = session.messages;
   candidate.push_back({"user", input});
@@ -1012,10 +1290,10 @@ void RunChatTurn(const std::string& input, const MiniLlamaModel& model,
 }
 
 // 驱动终端循环；trace_turns 决定是否展示逐轮追踪，库调用可保持简洁输出
-int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
-            const std::string& chat_template, const CommandOptions& options,
-            std::istream& input, std::ostream& output, const std::string& model_path,
-            bool trace_turns) {
+static int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
+                   const std::string& chat_template, const CommandOptions& options,
+                   std::istream& input, std::ostream& output,
+                   const std::string& model_path, bool trace_turns) {
   ValidateGeneration(model, tokenizer, options.n_predict, options.sampling);
 
   // 终端使用注入的 I/O；会话、上下文和采样器在整个交互期间持续存在
@@ -1029,6 +1307,9 @@ int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
   MiniLlamaContext context(&model);
   MiniSampler sampler(options.sampling);
   if (trace_turns) {
+    if (model.cuda_weights) {
+      PrintCudaExecutionSummary(model, "", output);
+    }
     output << "backend: " << BackendKindName(options.backend.kind) << '\n'
            << BackendExecutionNote(options.backend) << '\n';
   }
@@ -1078,6 +1359,9 @@ int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
     request.Finish();
     if (trace_turns) {
       PrintRequestTrace(request, output);
+      if (model.cuda_weights) {
+        PrintCudaRuntimeSummary(model, "", output);
+      }
     }
   }
   return 0;
@@ -1088,7 +1372,7 @@ int RunChat(const MiniLlamaModel& model, const ITokenizer& tokenizer,
 // ----------------------------------------------
 
 // 检查 GGUF 文件头、元数据和张量目录，不装配模型权重或执行推理
-int RunInspectGguf(const std::filesystem::path& path, std::ostream& output) {
+static int RunInspectGguf(const std::filesystem::path& path, std::ostream& output) {
   GgufReader reader;
   if (!reader.Load(path.string())) {
     throw std::runtime_error("failed to inspect GGUF: " + reader.load_error);
@@ -1118,7 +1402,7 @@ int RunInspectGguf(const std::filesystem::path& path, std::ostream& output) {
 }
 
 // 统一模型检查入口，GGUF 复用文件检查，JSON 只解析和校验清单
-int RunInspect(const ModelPaths& paths, std::ostream& output) {
+static int RunInspect(const ModelPaths& paths, std::ostream& output) {
   if (paths.gguf) {
     return RunInspectGguf(paths.model, output);
   }
@@ -1146,8 +1430,6 @@ int RunInspect(const ModelPaths& paths, std::ostream& output) {
          << "\n  path: " << manifest.tokenizer.path << '\n';
   return 0;
 }
-
-}  // namespace
 
 // ----------------------------------------------
 // 兼容现有库调用的可注入入口
@@ -1180,20 +1462,44 @@ int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
     if (options.command != "generate" && options.command != "run") {
       throw std::invalid_argument("Run requires generate or run mode");
     }
-    ValidateInferenceBackend(options.backend);
+    if (!ValidateBackendOrPrint(options.backend, error)) {
+      return 1;
+    }
+
     if (options.n_threads >= 0) {
       SetThreadCount(options.n_threads);
     }
+
+    std::unique_ptr<MiniLlamaModel> prepared;
+    const MiniLlamaModel* inference_model = &model;
+
+    if ((options.backend.kind == BackendKind::kCuda &&
+         (!model.cuda_weights ||
+          model.cuda_weights->device_id != options.backend.device_id)) ||
+        (options.backend.kind == BackendKind::kCpu && model.cuda_weights) ||
+        !options.quant_type.empty()) {
+      prepared = std::make_unique<MiniLlamaModel>(model);
+      ApplyQuantOverride(*prepared, options.quant_type);
+      if (options.backend.kind == BackendKind::kCuda) {
+        UploadModelWeightsToCuda(*prepared, options.backend.device_id);
+      } else {
+        ClearModelCudaWeights(*prepared);
+      }
+      inference_model = prepared.get();
+    }
+
     if (options.command == "run") {
       // 此接口没有模板参数，沿用纯文本聊天，并关闭逐轮追踪输出
-      return RunChat(model, tokenizer, "", options, input, output, "", false);
+      return RunChat(*inference_model, tokenizer, "", options, input, output, "",
+                     false);
     }
 
     // 单轮库入口仅输出生成正文，保持既有调用和单元测试的输出约定
     RequestContext request =
         StartRequest("generate", BackendKindName(options.backend.kind), "");
     output << DecodeGeneratedTokens(
-                  tokenizer, GenerateTokens(model, tokenizer, options, request))
+                  tokenizer,
+                  GenerateTokens(*inference_model, tokenizer, options, request))
            << '\n';
     return 0;
   } catch (const std::exception& exception) {
@@ -1242,7 +1548,9 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
     }
 
     if (IsInferenceCommand(options.command)) {
-      ValidateInferenceBackend(options.backend);
+      if (!ValidateBackendOrPrint(options.backend, error)) {
+        return 1;
+      }
     }
 
     // 检查命令独立分发，不创建分词器、KV Cache 或生成请求
@@ -1282,6 +1590,17 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
     // 解析实际模型文件后一起加载模型、分词器与模板，并检查词表兼容性
     const ModelPaths paths = ResolveModelPaths(options);
     LoadedModel loaded = LoadModelAndTokenizer(paths, options);
+
+    // 基准量化误差对照保留原模型；量化与上传都在推理前完成。
+    std::unique_ptr<MiniLlamaModel> baseline_model;
+    if (options.command == "bench" && !options.quant_type.empty()) {
+      baseline_model = std::make_unique<MiniLlamaModel>(loaded.model);
+    }
+    ApplyQuantOverride(loaded.model, options.quant_type);
+    if (!PrepareCudaWeightsOrPrint(loaded.model, options.backend, error)) {
+      throw std::runtime_error("CUDA weight preparation failed");
+    }
+    ResetModelCudaRuntimeStats(loaded.model);
     ValidateGeneration(loaded.model, *loaded.tokenizer, options.n_predict,
                        options.sampling);
     request.model_load_ms = ElapsedMs(stage_start);
@@ -1298,9 +1617,10 @@ int RunMain(int argc, const char* const argv[], std::istream& input,
     }
 
     // 单轮生成与基准测试都在完成推理后统一结束并输出请求追踪
-    const int status = options.command == "bench"
-                           ? RunBench(loaded, options, request, output)
-                           : RunGenerate(loaded, options, request, output);
+    const int status =
+        options.command == "bench"
+            ? RunBench(loaded, options, request, output, baseline_model.get())
+            : RunGenerate(loaded, options, request, output);
     request.Finish();
     PrintRequestTrace(request, error);
     return status;

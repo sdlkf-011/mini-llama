@@ -82,15 +82,13 @@ void ValidateBackend(const BackendConfig& config) {
   throw std::runtime_error("unknown backend");
 }
 
-// 仅说明 CLI 执行路径，不查询环境；独立 CUDA 算子可用不代表 CLI 推理已接入
+// 仅说明 CLI 执行路径，不查询环境
 std::string BackendExecutionNote(const BackendConfig& config) {
   if (config.kind == BackendKind::kCpu) {
     return "compute: cpu";
   }
   if (config.kind == BackendKind::kCuda) {
-    // CUDA 算子分发属于后续模块，此处不能把未实现的 Attention/Decode 标为启用
-    return "compute: unavailable (CUDA execution path is not implemented in this "
-           "checkout)";
+    return "compute: cuda (device-resident decode; CPU sampler)";
   }
   throw std::runtime_error("unknown backend");
 }

@@ -38,8 +38,8 @@ Tensor MakeWeight() {
   return weight;
 }
 
+// 测试目的：验证 Q8_0 往返误差受控，且直接量化线性层等价于反量化后计算。
 TEST(QuantTest, Q80RoundTripAndLinearMatchDequantizedReference) {
-  // 验证 Q8_0 往返误差受控，且直接量化线性层等价于反量化后计算。
   const Tensor weight = MakeWeight();
   const auto blocks = QuantizeToQ80(weight);
   const Tensor dequantized = DequantizeFromQ80(blocks, weight.shape);
@@ -50,8 +50,8 @@ TEST(QuantTest, Q80RoundTripAndLinearMatchDequantizedReference) {
              1e-5f);
 }
 
+// 测试目的：验证 Q4_0 往返误差受控，并覆盖批大小为 1 的二维输入路径。
 TEST(QuantTest, Q40RoundTripAndLinearMatchDequantizedReference) {
-  // 验证 Q4_0 往返误差受控，并覆盖批大小为 1 的二维输入路径。
   const Tensor weight = MakeWeight();
   const auto blocks = QuantizeToQ40(weight);
   const Tensor dequantized = DequantizeFromQ40(blocks, weight.shape);
@@ -62,8 +62,8 @@ TEST(QuantTest, Q40RoundTripAndLinearMatchDequantizedReference) {
              1e-5f);
 }
 
+// 测试目的：验证 Q4_1 点积同时应用块级缩放因子和最小值偏移。
 TEST(QuantTest, Q41LinearUsesScaleAndMinimum) {
-  // 验证 Q4_1 点积同时应用块级缩放因子和最小值偏移。
   BlockQ41 block{};
   block.d = 0x3c00;
   block.m = 0x3800;
@@ -77,8 +77,8 @@ TEST(QuantTest, Q41LinearUsesScaleAndMinimum) {
   EXPECT_FLOAT_EQ(output.data[0], 80.0f);
 }
 
+// 测试目的：验证线性层和反量化会拒绝非法权重形状及不匹配的块数量。
 TEST(QuantTest, RejectsInvalidShapesAndBlockCounts) {
-  // 验证线性层和反量化会拒绝非法权重形状及不匹配的块数量。
   Tensor input({32}, 1.0f);
   EXPECT_THROW(LinearQ80(input, {}, {1, 32}), std::runtime_error);
   EXPECT_THROW(LinearQ40(input, {}, {32}), std::runtime_error);

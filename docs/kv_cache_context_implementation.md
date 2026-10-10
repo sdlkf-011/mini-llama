@@ -61,8 +61,9 @@ values : [n_layers, max_seq_len, n_kv_heads, head_dim]
 前向实现通过 `ForwardLinear`、`ForwardRmsNorm`、`ForwardSwiGlu`、`ForwardSoftmax` 和
 `ForwardRope` 进行算子封装。当前 CPU Linear 已按 F32/Q8_0/Q4_0/Q4_1 分发；CPU Attention 按
 head 并行。
-CUDA Tensor 与权重上传属于库能力，不切换 CPU 前向；KV Cache 与 Attention
-仍在 CPU。设备侧现状见 [CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
+没有 CUDA 快照时使用上述 CPU 前向；完整上传快照存在时切换到设备前向，
+使用 GPU KV Cache 和 Attention，只下载最终 logits。设备侧现状见
+[CUDA 说明](backend_selection_cuda_runtime_implementation.md)。
 
 ### RoPE 与算子扩展
 
@@ -124,5 +125,6 @@ ctest --test-dir build --output-on-failure
 
 模型加载、采样、完整对话编排与 CLI 当前均已接入。上下文仍持有完整窗口的 CPU
 F32 KV Cache，ForwardBatch 仍按 token 顺序计算；量化 batch Linear 不代表多序列
-并行推理。RadixTree 只记录前缀，不保存跨上下文 KV 快照。CUDA 张量与权重上传
-不选择推理后端，GPU 前向或设备驻留 decode 尚未实现。
+并行推理。RadixTree 只记录前缀，不保存跨上下文 KV 快照。完整 CUDA 前向已接入，
+GPU Cache 首次设备前向时分配；GPU 计算不镜像更新 CPU Cache。
+切换后端或实际更换权重后须创建新 Context 并重放历史。

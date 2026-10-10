@@ -1,9 +1,12 @@
 #include "mini_llama/cuda_kv_cache.h"
 
-#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <utility>
+
+#ifdef MINI_LLAMA_USE_CUDA
+#include <cuda_runtime_api.h>
+#endif
 
 namespace mini_llama {
 namespace {
@@ -90,19 +93,22 @@ void CudaKvCache::ValidateWriteTensors(const Tensor& k, const Tensor& v) const {
 }
 
 void CudaKvCache::Clear() {
-  if (empty()) return;
-  // 复用现有拷贝接口，分块上传零值以限制主机临时内存；仅用于清理或初始化
-  std::vector<float> zeros(std::min<size_t>(keys_.bytes() / sizeof(float), 262144),
-                           0);
-  CudaSetDevice(device_id_);
-  for (size_t offset = 0; offset < keys_.bytes();) {
-    size_t bytes = std::min(keys_.bytes() - offset, zeros.size() * sizeof(float));
-    for (auto* buffer : {&keys_, &values_}) {
-      CudaMemcpyBytes(static_cast<char*>(buffer->data()) + offset, zeros.data(),
-                      bytes, CudaMemcpyKind::kHostToDevice);
-    }
-    offset += bytes;
+  if (empty()) {
+    return;
   }
+  CudaSetDevice(device_id_);
+#ifdef MINI_LLAMA_USE_CUDA
+  // 清零属于缓存内部实现，不扩展 Runtime 公共接口或上传主机零值
+  for (auto* buffer : {&keys_, &values_}) {
+    const auto status = cudaMemset(buffer->data(), 0, buffer->bytes());
+    if (status != cudaSuccess) {
+      throw std::runtime_error(std::string("CudaKvCache::Clear: cudaMemset: ") +
+                               cudaGetErrorString(status));
+    }
+  }
+#else
+  throw std::runtime_error("CUDA KV cache was not built");
+#endif
 }
 
 void CudaKvCache::Write(int layer, int pos, const Tensor& k, const Tensor& v) {
@@ -117,14 +123,22 @@ void CudaKvCache::Write(int layer, int pos, const Tensor& k, const Tensor& v) {
                   slot_bytes, CudaMemcpyKind::kHostToDevice);
 }
 
-// 完整校验两个输入后再写入，避免输入不匹配时只修改其中一个槽位
+// 完整校验两个输入后再写入；扁平 Linear 输出与分头向量布局相同
 void CudaKvCache::WriteDevice(int layer, int pos, const CudaTensor& k,
                               const CudaTensor& v) {
   const size_t offset = SlotOffsetBytes(layer, pos);
   const size_t slot_bytes =
       static_cast<size_t>(n_kv_heads_) * head_dim_ * sizeof(float);
   const std::vector<int> shape{n_kv_heads_, head_dim_};
-  if (k.shape() != shape || v.shape() != shape || k.bytes() != slot_bytes ||
+  const size_t slot_elements = slot_bytes / sizeof(float);
+  const std::vector<int> flat_shape{
+      slot_elements <= static_cast<size_t>(std::numeric_limits<int>::max())
+          ? static_cast<int>(slot_elements)
+          : 0};
+  const auto valid_shape = [&](const CudaTensor& tensor) {
+    return tensor.shape() == shape || tensor.shape() == flat_shape;
+  };
+  if (!valid_shape(k) || !valid_shape(v) || k.bytes() != slot_bytes ||
       v.bytes() != slot_bytes || k.size() != slot_bytes / sizeof(float) ||
       v.size() != slot_bytes / sizeof(float) || k.empty() || v.empty() ||
       k.device_id() != device_id_ || v.device_id() != device_id_) {

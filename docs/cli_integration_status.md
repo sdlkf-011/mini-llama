@@ -9,7 +9,8 @@ CPU 调度、F32 SIMD 和测试细节见
 
 ## 构建与入口
 
-所有 `src/*.cc` 已纳入 `mini_llama_core`；`cuda_ops.cu`、`cuda_quant.cu` 仅在
+所有 `src/*.cc` 已纳入 `mini_llama_core`；`cuda_ops.cu`、`cuda_quant.cu`、
+`cuda_attention.cu` 仅在
 CUDA 构建中编译，链接 Runtime 和 cuBLAS，C++ / CUDA 标准均为 C++17。
 `mini-llama` 可执行目标定义
 `MINI_LLAMA_BUILD_EXECUTABLE`，启用同一个 `src/main.cc` 中的全局 `main()`。
@@ -20,24 +21,24 @@ CUDA 构建中编译，链接 Runtime 和 cuBLAS，C++ / CUDA 标准均为 C++17
 | --- | --- |
 | `generate` | 单轮生成，默认教学模型、`hello`、16 个生成 token |
 | `run` | 多轮聊天，需要模型路径，默认每轮最多生成 64 个 token |
-| `bench` | 测量预填充与逐 token 解码性能，可用 `--verbose` 输出调试信息 |
+| `bench` | 默认生成预算 16，测量预填充与逐 token 解码性能，可用 `--verbose` 输出调试信息 |
 | `inspect` | 检查 JSON 清单或 GGUF 元数据，不加载模型权重或分词器 |
 | `inspect-gguf` | 直接检查 GGUF 文件头、元数据和张量目录 |
 | `--cuda-info` | 查询 CUDA Runtime 构建状态和真实 GPU 信息，失败时返回非零 |
 
 CPU 线程配置已通过 `--threads` 接入推理命令，后端选项和 CUDA Runtime 诊断也已接入。
-库层已有 CUDA Tensor、F32/Q8_0 上传快照、cuBLAS F32 Linear 和独立
-Ops/Quant Kernel。`ForwardToken()` 对命中上传快照的 F32 Linear 执行 CUDA，
-其余算子、量化/未命中 Linear、Attention 与 KV Cache 仍在 CPU。
-独立 Ops/Quant 尚未接入模型前向。F32 混合路径记录 Linear、CPU Attention
-fallback 和边界 H2D/D2H；激活、设备 Attention、设备 KV 字段仍为预留计数。
-CLI 未调用上传接口，CUDA 推理请求仍明确报错；没有完整设备驻留 decode。
+库层已有 CUDA Tensor、F32/Q8_0/Q4_0/Q4_1 上传快照、cuBLAS F32 Linear、
+Ops/Quant Kernel、GPU Attention 与 KV Cache。`ForwardToken()` 无快照时执行
+CPU 前向，存在快照时执行完整设备前向；缺失或损坏权重明确报错。
+CLI `generate/run/bench --backend cuda` 已调用上传入口，激活和 KV 历史在 GPU，
+只下载最终 logits 供 CPU 采样。正常路径 H2D 和 CPU Attention fallback 均为 0。
+运行统计记录实际成功的算子调用、KV 逻辑字节和边界拷贝；上传统计独立。
 后端参数、Runtime 当前行为与验证结果见
 [后端选择与 CUDA Runtime 阶段实现汇总](backend_selection_cuda_runtime_implementation.md)。
-整模型 `QuantizeModelToQ80/Q40()` 已有库实现，尚未接入 CLI；转换所有 Linear，
+整模型 `QuantizeModelToQ80/Q40()` 通过 `--quant q8_0|q4_0` 接入三个推理命令；转换所有 Linear，
 保持 embedding/norm/bias，成功改变权重后清除旧 CUDA 快照。已有 CPU 量化
-Linear 可执行 GGUF Q8_0/Q4_0/Q4_1 权重。单张量量化、权重字节统计与上传也是
-库能力，没有对应命令行开关。
+Linear 可执行 GGUF Q8_0/Q4_0/Q4_1 权重，CUDA 上传与前向也支持这三种格式。
+`bench` 输出权重实际大小/F32 等价大小；CUDA 自动上传，无需额外上传参数。
 
 ## 参数与模型选择
 
@@ -59,6 +60,33 @@ Linear 可执行 GGUF Q8_0/Q4_0/Q4_1 权重。单张量量化、权重字节统�
 超过上下文的完整生成预算，`-n 0` 只执行 prefill；`run` 要求正数响应预算并根据
 当前剩余窗口截断。`bench` 接受 `-n 0` 测量纯预填充，并在达到上下文上限时停止。
 既有库调用保留按窗口剩余容量截断的行为。
+
+### 后端与量化
+
+`generate/run/bench` 默认 `--backend cpu`。CUDA 请求先检查构建与设备，再
+加载资源、可选重量化、上传权重并重置运行计数；初始化或推理失败直接报错。
+`--device` 仅与 CUDA 配合，默认设备 0。`inspect --backend cuda` 只检查参数
+和元数据，即使未构建 CUDA 也可使用；检查命令不接受 `--quant`。
+
+`--quant q8_0|q4_0` 只改变 Linear，Embedding、Norm 和 bias 保持 F32。
+不传则保持模型加载后的格式；Q4_1 可直接从 GGUF 加载并执行，但不是 CLI
+重量化目标。已加载模型的库入口 `Run()` 也接受后端与量化选项，通过模型副本
+准备所需权重，保持调用方模型。直接 `Generate()` / `ForwardBatch()` 则使用
+传入模型的快照状态。
+
+```bash
+./build-cuda/mini-llama generate models/tiny --backend cuda -p hello -n 4
+./build-cuda/mini-llama run models/chat --backend cuda -n 16
+./build-cuda/mini-llama bench models/tiny --backend cuda --quant q4_0 -n 4
+```
+
+CUDA 摘要的 `gpu memory used` 仅指上传权重的显存，不含 KV Cache 和临时激活。
+generate/bench 的运行摘要累计当前请求的 Prefill + Decode；run 的设备计数
+自权重准备后跨轮累计，`/clear` 重建会话与 Cache，不重置模型设备计数。
+每次 Forward 的 D2H 是
+`vocab_size * 4` 字节。共享快照计数采用单调用线程约定。
+设备数据流、计数公式与上下文切换约定见
+[设备驻留 CUDA Decode](device_resident_cuda_decode.md)。
 
 ### CPU 线程数
 
@@ -117,6 +145,13 @@ decode。首个生成 token 直接从 prefill logits 采样，因此生成 N 个
 结果同时输出 `tokens/s (total):`、`tokens/s (Decode):`，保留原有
 `throughput:` 和 `decode throughput:` 标签。
 
+`bench --quant` 在保留原模型的基础上输出实际权重字节、F32 等价字节，以及
+同一 prompt 最后位置 logits 相对模型原始格式的最大/平均绝对误差。原始格式
+可能含量化权重，不是全 F32 Golden；该误差不评估长文本质量。额外两次前向
+位于性能计时之外；CUDA 运行摘要在误差计算之前打印，仅覆盖基准工作量。
+`--verbose` 的 KV shape 来自上下文保留的 CPU Cache 配置，GPU 历史的实际
+读写应以 CUDA KV 统计为准。
+
 `RunChat()` 驱动交互，`RunChatTurn()` 根据 RadixTree 命中与当前物理上下文的
 公共前缀确定复用范围，只对缺失后缀 prefill。正常生成结束后提交消息与缓存
 前缀；推理失败时重建上下文并清除当前 token 跟踪，避免复用半轮数据。
@@ -146,18 +181,43 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 
 ## 回归验证
 
-最近一次实际全量回归中，CPU 161 项通过、28 项跳过，CUDA 单 GPU
+2026-10-10 本次同步后重新配置、构建并运行全量 CTest，环境为 Release、
+GCC 13、CUDA 12.3 / Clang 18、RTX 4060 Laptop（CC 8.9）：
+
+| 配置 | 注册 | 实际通过 | 跳过 | 失败 |
+| --- | ---: | ---: | ---: | ---: |
+| CPU，MINI_LLAMA_CUDA=OFF | 212 | 164 | 48 | 0 |
+| CUDA，真实单 GPU | 212 | 204 | 8 | 0 |
+
+CPU 跳过依赖 CUDA 构建或 GPU 的 48 项；GPU 跳过 7 项 CPU Stub 专用用例和
+1 项多 GPU 用例。GPU 结果来自可访问真实设备的环境，未将沙箱内的跳过计作通过。
+`backend-cli-smoke`、`threaded-cli-smoke`、`golden-logits` 均计入全量；Python
+脚本内部子用例不另加到 CTest 注册数。
+
+后端 CLI 覆盖默认 CPU、非法参数、无设备、元数据检查、CPU/CUDA logits 对照、
+generate/bench/run 与 Q8_0/Q4_0 重量化；聊天逐轮检查 `status=ok` 和实际生成，
+覆盖连续会话及 `/clear` 后重放。线程 CLI 比较 1/4/自动配置及 9 份 logits。
+CUDA Forward 测试覆盖四种 Linear、GQA、两种 RoPE、bias、缓存历史、快照校验
+与 0 H2D / 1 D2H；NumPy golden 验证 CPU logits。
+
+真实 Qwen2 GGUF 的 inspect、CPU/CUDA 8 步生成 logits 对照、CUDA bench 和
+三轮聊天验证见[设备驻留 Decode 本次同步复验](device_resident_cuda_decode.md#项目链路与文档同步复验)。
+本次构建日志、CTest/JUnit 和真实模型输出保存在 `.cache/project-sync-20261010/`，
+缓存不属于提交内容。只验证单 GPU，未运行 compute-sanitizer。
+
+以下为此前 Ops/Quant 阶段记录，保留当时的接入范围，不能作为当前总数。
+当时 CPU 161 项通过、28 项跳过，CUDA 单 GPU
 182 项通过、7 项跳过；均注册 189 项，失败为 0。
 独立 Ops/Quant 专项匹配 8 项：CPU 3 项通过、5 项跳过，GPU 5 项通过、
 3 项 CPU Stub 跳过。原始日志见[本阶段验证记录](cuda_ops_quant_implementation.md)。
-完整设备前向和 CUDA CLI benchmark 仍属于后续模块，未计入这些通过结果。
+当时完整设备前向和 CUDA CLI benchmark 尚未接入，未计入上述历史结果。
 
 以下为较早的 CUDA Tensor 阶段记录，保留当时的接入范围，不能作为当前总数。
 
 本阶段接口、所有权与测试覆盖见
 [CUDA Tensor 与模型权重上传阶段总结](cuda_tensor_model_weights_implementation.md)。
 
-已移除不存在的 GPU 前向测试注册，保留 CPU 前向并注册实际存在的 Runtime
+该阶段移除不存在的 GPU 前向测试注册，保留 CPU 前向并注册实际存在的 Runtime
 与 CUDA Tensor 测试。Runtime 的零长度操作、设备信息格式、设备恢复及 Reset
 失败状态保持已与既有测试约定对齐；CUDA Tensor 移动后源对象恢复为空。
 

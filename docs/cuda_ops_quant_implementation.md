@@ -1,9 +1,14 @@
-# CUDA 基础算子、量化 Linear 与权重上传调整阶段总结
+# CUDA 基础算子、量化 Linear 与权重上传调整阶段总结（历史阶段）
+
+> 本文主体记录 `15643de` 阶段，下面的“当前”指该阶段。此后四种格式权重
+> 上传、完整设备前向、GPU Attention/KV Cache 和 CLI CUDA/量化均已接入，
+> 必需空权重校验已修复。当前契约与验证见
+> [设备驻留 Decode](device_resident_cuda_decode.md)及[CLI 同步说明](cli_integration_status.md)。
 
 本阶段对应提交 `15643de`（`CUDA Kernels: Act, Quant, Upload`）。
 新增独立 CUDA 基础算子和 Q8_0/Q4_0/Q4_1 Linear，接入 CPU Stub、
 C++17/CUDA 构建与专项测试，并维护已有权重上传入口。既定公共接口、CPU
-计算实现和模型/上下文结构保持原样；注释与接入状态说明按当前源码同步。
+计算实现和模型/上下文结构在该阶段保持原样。
 
 ## 本阶段与此前阶段的关系
 
@@ -163,7 +168,7 @@ GPU 专项的 5 项实际执行基础算子数值对照及 Q8_0/Q4_0 数值/输�
 本机原始日志、JUnit XML 和跳过名称清单保存在 `.cache/` 下的验证缓存中；
 缓存不属于提交内容，清理后不影响本文的结果记录。
 
-## 当前接入状态与后续边界
+## 本阶段接入状态与后续边界
 
 没有快照时库前向走 CPU；命中已有快照的 F32 Linear 执行 cuBLAS，量化或
 未命中 Linear 继续走 CPU。Norm、RoPE、FFN 辅助运算、Attention 和 KV Cache

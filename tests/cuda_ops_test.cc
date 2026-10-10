@@ -24,7 +24,9 @@ void Close(const Tensor& actual, const Tensor& expected) {
 // 测试目的：CPU 构建中的全部 Ops 主机/设备入口均抛异常，不访问无效设备指针
 // 这是 Stub 契约验证，不代表这些算子已在 GPU 执行
 TEST(CudaOpsStub, RejectsAllHostAndDeviceEntrypoints) {
-  if (CudaOpsBuilt()) GTEST_SKIP() << "requires CPU-only build";
+  if (CudaOpsBuilt()) {
+    GTEST_SKIP() << "requires CPU-only build";
+  }
   Tensor x({16}, 0.2f), q({4, 4}, 0.2f), k({2, 4}, 0.3f);
   CudaTensor device;
   EXPECT_THROW(CudaRmsNorm(x, x, 1e-5f), std::runtime_error);
@@ -51,9 +53,13 @@ TEST(CudaOpsStub, RejectsAllHostAndDeviceEntrypoints) {
 class CudaOpsGpu : public ::testing::Test {
  protected:
   void SetUp() override {
-    if (!CudaOpsBuilt()) GTEST_SKIP() << "CUDA was not built";
+    if (!CudaOpsBuilt()) {
+      GTEST_SKIP() << "CUDA was not built";
+    }
     try {
-      if (CudaDeviceCount() == 0) GTEST_SKIP() << "no CUDA device";
+      if (CudaDeviceCount() == 0) {
+        GTEST_SKIP() << "no CUDA device";
+      }
       CudaGetDeviceInfo(0);
     } catch (const std::exception& e) {
       GTEST_SKIP() << "GPU query unavailable: " << e.what();
@@ -65,13 +71,17 @@ class CudaOpsGpu : public ::testing::Test {
 // 验证 RoPE 主机及设备原地更新，并覆盖 Normal/NeoX 配对和不同的 Q/K 头数
 TEST_F(CudaOpsGpu, HostAndDeviceOpsMatchCpu) {
   Tensor x({35}), weight({35}, 1.0f);
-  for (size_t i = 0; i < x.size(); ++i) x.data[i] = std::sin(0.3f * i);
+  for (size_t i = 0; i < x.size(); ++i) {
+    x.data[i] = std::sin(0.3f * i);
+  }
   Close(CudaRmsNorm(x, weight, 1e-5f), RmsNorm(x, weight, 1e-5f));
   Close(CudaSilu(x), Silu(x));
   Close(CudaSoftmax(x), Softmax(x));
   Close(CudaElementwiseMul(x, weight), ElementwiseMul(x, weight));
   Tensor doubled = x;
-  for (auto& v : doubled.data) v *= 2;
+  for (auto& v : doubled.data) {
+    v *= 2;
+  }
   Close(CudaElementwiseAdd(x, x), doubled);
   auto dx = CudaTensorFromHost(x);
   auto dw = CudaTensorFromHost(weight);
