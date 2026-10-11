@@ -5,23 +5,55 @@
 
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 #include <stdexcept>
 
 #include "mini_llama/cuda_runtime.h"
 #include "mini_llama/model.h"
 
 namespace mini_llama::test {
-// 测试自包含；同时检查 shape、有限值和按参考值缩放的容差，避免只看最终 token
+// relative_error 按 max(1, |CPU|) 归一化；不是小值附近的纯相对误差。
+inline void RequireCloseTensor(const Tensor& actual, const Tensor& golden,
+                               float abs_tol, float rel_tol,
+                               const std::string& name) {
+  ASSERT_EQ(actual.shape, golden.shape) << name;
+  ASSERT_EQ(actual.size(), golden.size()) << name;
+  ASSERT_GE(abs_tol, 0.0f);
+  ASSERT_GE(rel_tol, 0.0f);
+  for (int dim : golden.shape) {
+    ASSERT_GT(dim, 0) << name;
+  }
+  for (size_t i = 0; i < actual.size(); ++i) {
+    const double expected = golden.data[i], value = actual.data[i];
+    const double abs_err = std::abs(value - expected);
+    const double rel_err = abs_err / std::max(1.0, std::abs(expected));
+    if (std::isfinite(expected) && std::isfinite(value) &&
+        (abs_err <= abs_tol || rel_err <= rel_tol)) {
+      continue;
+    }
+    size_t offset = i;
+    std::vector<size_t> position(golden.shape.size());
+    for (size_t d = position.size(); d > 0; --d) {
+      position[d - 1] = offset % golden.shape[d - 1];
+      offset /= golden.shape[d - 1];
+    }
+    std::ostringstream diagnostic;
+    diagnostic << name << " index=" << i << " position=[";
+    for (size_t d = 0; d < position.size(); ++d) {
+      diagnostic << (d == 0 ? "" : ",") << position[d];
+    }
+    diagnostic << "] CPU expected=" << expected << " CUDA actual=" << value
+               << " abs_error=" << abs_err << " relative_error=" << rel_err
+               << " abs_tol=" << abs_tol << " rel_tol=" << rel_tol;
+    ASSERT_TRUE(std::isfinite(expected) && std::isfinite(value)) << diagnostic.str();
+    EXPECT_TRUE(abs_err <= abs_tol || rel_err <= rel_tol) << diagnostic.str();
+  }
+}
+
+// 保留既有测试更严格的阈值；单参数同时设置绝对和归一化相对阈值。
 inline void RequireCloseTensor(const Tensor& actual, const Tensor& golden,
                                float tolerance = 2e-5f) {
-  ASSERT_EQ(actual.shape, golden.shape);
-  ASSERT_EQ(actual.size(), golden.size());
-  for (size_t i = 0; i < actual.size(); ++i) {
-    ASSERT_TRUE(std::isfinite(actual.data[i])) << "element " << i;
-    EXPECT_NEAR(actual.data[i], golden.data[i],
-                tolerance * std::max(1.0f, std::abs(golden.data[i])))
-        << "element " << i;
-  }
+  RequireCloseTensor(actual, golden, tolerance, tolerance, "tensor");
 }
 
 // 确定性的非零权重让漏投影、错误层权重和残差路径更容易在数值对照中暴露

@@ -11,7 +11,13 @@ import subprocess
 import sys
 import tempfile
 
-import numpy as np
+try:
+    import numpy as np
+except ModuleNotFoundError as error:
+    if error.name != "numpy":
+        raise
+    print("NOT RUN: golden-logits requires NumPy", file=sys.stderr)
+    raise SystemExit(77)
 
 from compare_logits import compare_logits, read_tokens, step_files
 from make_golden import encode_prompt

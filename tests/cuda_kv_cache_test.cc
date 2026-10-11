@@ -7,23 +7,13 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "cuda_forward_test_utils.h"
 #include "mini_llama/context.h"
 #include "mini_llama/forward.h"
 
 namespace {
 using namespace mini_llama;
-// 测试自包含；同时检查 shape、有限值和按参考值缩放的容差，避免只看最终 token
-void RequireCloseTensor(const Tensor& actual, const Tensor& golden,
-                        float tolerance = 2e-5f) {
-  ASSERT_EQ(actual.shape, golden.shape);
-  ASSERT_EQ(actual.size(), golden.size());
-  for (size_t i = 0; i < actual.size(); ++i) {
-    ASSERT_TRUE(std::isfinite(actual.data[i])) << "element " << i;
-    EXPECT_NEAR(actual.data[i], golden.data[i],
-                tolerance * std::max(1.0f, std::abs(golden.data[i])))
-        << "element " << i;
-  }
-}
+using mini_llama::test::RequireCloseTensor;
 
 // 确定性的非零权重让漏投影、错误层权重和残差路径更容易在数值对照中暴露
 Tensor Values(const std::vector<int>& shape, float phase = 0) {
@@ -219,9 +209,10 @@ TEST_F(CudaKvCacheGpuTest, ForwardLazyInitializationAndResidentHistory) {
     EXPECT_TRUE(context.cuda_kv_cache.empty());
     for (int pos = 0; pos < 3; ++pos) {
       reference.pos = context.pos = pos;
+      const auto expected = ForwardToken(reference, cpu, pos);
       ResetModelCudaRuntimeStats(gpu);
-      RequireCloseTensor(ForwardToken(context, gpu, pos),
-                         ForwardToken(reference, cpu, pos), 1e-4f);
+      RequireCloseTensor(ForwardToken(context, gpu, pos), expected, 1e-4f, 1e-4f,
+                         "KV forward logits");
       ASSERT_FALSE(context.cuda_kv_cache.empty());
       for (int l = 0; l < 2; ++l) {
         Tensor k({2, 4}), v(k.shape);

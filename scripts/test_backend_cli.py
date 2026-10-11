@@ -52,7 +52,7 @@ class BackendCliTest(unittest.TestCase):
 
     def failure(self, *args, contains, **kwargs):
         result = invoke(*args, **kwargs)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn(contains, result.stderr)
         self.assertNotIn("status=ok", result.stderr)
         self.assertNotIn("generated tokens:", result.stdout)
@@ -257,9 +257,14 @@ class BackendCliTest(unittest.TestCase):
                 self.assertEqual(len(cpu_data), len(gpu_data))
                 cpu = struct.unpack(f"<{len(cpu_data) // 4}f", cpu_data)
                 gpu = struct.unpack(f"<{len(gpu_data) // 4}f", gpu_data)
-                for expected, actual in zip(cpu, gpu):
-                    self.assertTrue(math.isfinite(actual))
-                    self.assertLessEqual(abs(actual - expected), 2e-4 + 2e-4 * abs(expected))
+                for index, (expected, actual) in enumerate(zip(cpu, gpu)):
+                    abs_err = abs(actual - expected)
+                    rel_err = abs_err / max(1.0, abs(expected))
+                    diagnostic = (f"{cpu_file.name} logits index={index} CPU expected={expected} "
+                                  f"CUDA actual={actual} abs_error={abs_err} relative_error={rel_err} "
+                                  "threshold=2e-4 + 2e-4 * abs(CPU)")
+                    self.assertTrue(math.isfinite(expected) and math.isfinite(actual), diagnostic)
+                    self.assertLessEqual(abs_err, 2e-4 + 2e-4 * abs(expected), diagnostic)
             self.assertEqual((paths[0] / "generation_tokens.txt").read_text(),
                              (paths[1] / "generation_tokens.txt").read_text())
 
@@ -288,22 +293,25 @@ class BackendCliTest(unittest.TestCase):
             self.check_chat(chat, 1)
         self.failure("generate", "--model", "missing-model", "--quant", "unknown",
                      contains="unsupported quant type")
-        if self.cuda_built and self.gpu_count:
-            for quant in ("q8_0", "q4_0"):
-                result = self.success("generate", MODEL, "--backend", "cuda",
-                                      "--quant", quant, "-n", "2", "--seed", "1")
-                self.check_resident_counters(result)
-                self.assertIn(f"cuda {quant} Linear weights: 15/15", result.stdout)
-                bench = self.success("bench", MODEL, "--backend", "cuda",
-                                     "--quant", quant, "-n", "2", "--seed", "1")
-                self.check_gpu(bench)
-                self.check_resident_counters(bench)
-                self.assertIn("logits error vs model-native:", bench.stdout)
-                chat = self.success("run", MODEL, "--backend", "cuda",
-                                    "--quant", quant, "-n", "2", "--seed", "1",
-                                    text="hello\n/exit\n")
-                self.check_gpu(chat)
-                self.check_chat(chat, 1)
+
+    def test_cuda_quant_overrides_generate_and_bench(self):
+        self.require_gpu()
+        for quant in ("q8_0", "q4_0"):
+            result = self.success("generate", MODEL, "--backend", "cuda",
+                                  "--quant", quant, "-n", "2", "--seed", "1")
+            self.check_resident_counters(result)
+            self.assertIn(f"cuda {quant} Linear weights: 15/15", result.stdout)
+            self.assertIn("cuda f32 Linear weights: 0/0", result.stdout)
+            bench = self.success("bench", MODEL, "--backend", "cuda",
+                                 "--quant", quant, "-n", "2", "--seed", "1")
+            self.check_gpu(bench)
+            self.check_resident_counters(bench)
+            self.assertIn("logits error vs model-native:", bench.stdout)
+            chat = self.success("run", MODEL, "--backend", "cuda",
+                                "--quant", quant, "-n", "2", "--seed", "1",
+                                text="hello\n/exit\n")
+            self.check_gpu(chat)
+            self.check_chat(chat, 1)
 
     def test_cuda_invalid_selected_device(self):
         self.require_gpu()

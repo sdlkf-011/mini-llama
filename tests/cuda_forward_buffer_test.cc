@@ -54,16 +54,24 @@ TEST_F(CudaForwardBufferTest, CacheMismatchAndLostOrSkippedHistoryAreRejected) {
 TEST_F(CudaForwardBufferTest,
        ReuploadPreservesCompatibleHistoryCpuSwitchRequiresFreshContext) {
   auto model = MakeModel();
+  auto reference = model;
+  MiniLlamaContext cpu(&reference);
+  const auto prefill = ForwardBatch(cpu, reference, MiniBatch::Single(0, 0));
+  const auto decode = ForwardBatch(cpu, reference, MiniBatch::Single(0, 1));
   UploadModelWeightsToCuda(model);
   MiniLlamaContext ctx(&model);
-  ForwardToken(ctx, model, 0);
+  ResetModelCudaRuntimeStats(model);
+  RequireCloseTensor(ForwardBatch(ctx, model, MiniBatch::Single(0, 0)), prefill);
+  RequireDeviceStats(model, 1);
   UploadModelWeightsToCuda(model);
-  ctx.pos = 1;
   // 上传同一组权重不改变模型语义，已有缓存配置仍可继续使用。
-  EXPECT_NO_THROW(ForwardToken(ctx, model, 0));
+  ResetModelCudaRuntimeStats(model);
+  RequireCloseTensor(ForwardBatch(ctx, model, MiniBatch::Single(0, 1)), decode);
+  RequireDeviceStats(model, 1);
   ClearModelCudaWeights(model);
   EXPECT_THROW(ForwardToken(ctx, model, 0), std::runtime_error);
-  MiniLlamaContext cpu(&model);
-  EXPECT_NO_THROW(ForwardToken(cpu, model, 0));
+  MiniLlamaContext fresh_cpu(&model);
+  RequireCloseTensor(ForwardBatch(fresh_cpu, model, MiniBatch::Single(0, 0)),
+                     prefill);
 }
 }  // namespace

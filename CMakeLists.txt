@@ -94,10 +94,21 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_COMMAND} -E env
             "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
             ${Python3_EXECUTABLE}
-            ${CMAKE_SOURCE_DIR}/scripts/test_backend_cli.py
+            ${CMAKE_SOURCE_DIR}/tests/backend_cli_test.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
   set_tests_properties(backend-cli-smoke PROPERTIES TIMEOUT 180)
+  add_test(
+    NAME cuda-chat-smoke
+    COMMAND ${CMAKE_COMMAND} -E env
+            "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
+            "PYTHONDONTWRITEBYTECODE=1"
+            ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/tests/cuda_chat_smoke_test.py
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+  set_tests_properties(cuda-chat-smoke PROPERTIES
+    TIMEOUT 600 SKIP_RETURN_CODE 77 LABELS "cuda;smoke")
   add_test(
     NAME threaded-cli-smoke
     COMMAND ${Python3_EXECUTABLE}
@@ -115,5 +126,6 @@ if(BUILD_TESTING)
   set_tests_properties(golden-logits PROPERTIES
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     TIMEOUT 120
+    SKIP_RETURN_CODE 77
   )
 endif()

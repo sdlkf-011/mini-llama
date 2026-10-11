@@ -17,14 +17,21 @@ TEST_F(CudaForwardTest, SingleAndMultipleTokensDownloadOnly128Logits) {
   cpu.token_embedding = Values({128, cpu.config.dim}, 0.3f);
   cpu.lm_head = ToQuantizedTensor(Values({128, cpu.config.dim}, 0.19f));
   auto gpu = cpu;
-  UploadModelWeightsToCuda(gpu);
-  MiniLlamaContext c(&cpu), g(&gpu);
+  MiniLlamaContext c(&cpu);
+  std::vector<Tensor> expected;
   for (int p = 0; p < 3; ++p) {
-    c.pos = g.pos = p;
+    expected.push_back(ForwardBatch(c, cpu, MiniBatch::Single(p, p)));
+  }
+  UploadModelWeightsToCuda(gpu);
+  MiniLlamaContext g(&gpu);
+  ResetModelCudaRuntimeStats(gpu);
+  for (int p = 0; p < 3; ++p) {
+    SCOPED_TRACE(p);
     if (p == 1) {
       ResetModelCudaRuntimeStats(gpu);
     }
-    RequireCloseTensor(ForwardToken(g, gpu, p), ForwardToken(c, cpu, p), 2e-4f);
+    RequireCloseTensor(ForwardBatch(g, gpu, MiniBatch::Single(p, p)), expected[p],
+                       2e-4f, 2e-4f, "logits");
     const size_t count = p == 2 ? 2 : 1;
     RequireDeviceStats(gpu, count);
     EXPECT_EQ(ModelCudaDeviceToHostBytes(gpu), count * 512);
@@ -38,10 +45,15 @@ TEST_F(CudaForwardTest, ThreeTokensCountersReflectOperatorStructure) {
   model.config.vocab_size = 128;
   model.token_embedding = Values({128, model.config.dim}, 0.3f);
   model.lm_head = ToQuantizedTensor(Values({128, model.config.dim}, 0.19f));
+  auto cpu = model;
+  MiniLlamaContext reference(&cpu);
+  const auto batch = MiniBatch::FromTokens({0, 1, 2});
+  const auto expected = ForwardBatch(reference, cpu, batch);
   UploadModelWeightsToCuda(model);
   MiniLlamaContext ctx(&model);
   ResetModelCudaRuntimeStats(model);
-  ForwardBatch(ctx, model, MiniBatch::FromTokens({0, 1, 2}));
+  RequireCloseTensor(ForwardBatch(ctx, model, batch), expected, 2e-4f, 2e-4f,
+                     "batch logits");
   RequireDeviceStats(model, 3);
   EXPECT_EQ(ModelCudaLinearCalls(model), 45u);
   EXPECT_EQ(ModelCudaActivationCalls(model), 45u);
