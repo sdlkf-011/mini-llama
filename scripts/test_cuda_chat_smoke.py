@@ -36,6 +36,30 @@ class CudaChatSmokeTest(unittest.TestCase):
     def number(self, output, label):
         match = re.search(r"^\s*" + re.escape(label) + r": (\d+)$",
                           output, re.MULTILINE)
+        # GGUF inspect reports tensor shapes and architecture metadata rather
+        # than the JSON manifest's configuration labels.
+        if match is None and output.startswith("GGUF version="):
+            if label == "vocab_size":
+                match = re.search(r"^tensor token_embd\.weight "
+                                  r"shape=\[\d+,(\d+)\]", output, re.MULTILINE)
+            elif label == "head_dim":
+                dim = self.number(output, "dim")
+                heads = self.number(output, "n_heads")
+                self.assertGreater(heads, 0)
+                self.assertEqual(dim % heads, 0)
+                return dim // heads
+            else:
+                fields = {"dim": "embedding_length", "n_layers": "block_count",
+                          "n_heads": "attention.head_count",
+                          "n_kv_heads": "attention.head_count_kv"}
+                if label in fields:
+                    architecture = re.search(
+                        r"^metadata general\.architecture \(string\): (\S+)$",
+                        output, re.MULTILINE)
+                    self.assertIsNotNone(architecture, "missing GGUF architecture")
+                    key = architecture.group(1) + "." + fields[label]
+                    match = re.search(r"^metadata " + re.escape(key) +
+                                      r" \(u?int\d+\): (\d+)$", output, re.MULTILINE)
         self.assertIsNotNone(match, f"missing {label}:\n{output}")
         return int(match.group(1))
 

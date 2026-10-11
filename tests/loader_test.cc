@@ -1,3 +1,4 @@
+// 测试目的：验证 JSON 清单解析、tiny 模型权重加载及配置和文件完整性检查。
 #include "mini_llama/loader.h"
 
 #include <gtest/gtest.h>

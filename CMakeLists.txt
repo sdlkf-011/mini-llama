@@ -94,7 +94,7 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_COMMAND} -E env
             "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
             ${Python3_EXECUTABLE}
-            ${CMAKE_SOURCE_DIR}/tests/backend_cli_test.py
+            ${CMAKE_SOURCE_DIR}/scripts/test_backend_cli.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
   set_tests_properties(backend-cli-smoke PROPERTIES TIMEOUT 180)
@@ -104,7 +104,7 @@ if(BUILD_TESTING)
             "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
             "PYTHONDONTWRITEBYTECODE=1"
             ${Python3_EXECUTABLE}
-            ${CMAKE_SOURCE_DIR}/tests/cuda_chat_smoke_test.py
+            ${CMAKE_SOURCE_DIR}/scripts/test_cuda_chat_smoke.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
   set_tests_properties(cuda-chat-smoke PROPERTIES

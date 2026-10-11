@@ -1,3 +1,4 @@
+// 测试目的：验证 Q8_0/Q4_0/Q4_1 的 CUDA 投影、尾块、bias、驻留权重及 CPU stub。
 #include "mini_llama/cuda_quant.h"
 
 #include <gtest/gtest.h>
@@ -6,8 +7,8 @@
 #include <cstring>
 #include <stdexcept>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/quant.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;

@@ -335,21 +335,15 @@ static void PrintCudaExecutionSummary(const MiniLlamaModel& model,
   out << indent
       << "cuda f32 Linear weights: " << ModelCudaUploadedF32WeightCount(model) << "/"
       << counts.f32 << '\n';
-  if (counts.q8_0 > 0) {
-    out << indent
-        << "cuda q8_0 Linear weights: " << ModelCudaUploadedQ80WeightCount(model)
-        << "/" << counts.q8_0 << '\n';
-  }
-  if (counts.q4_0 > 0) {
-    out << indent
-        << "cuda q4_0 Linear weights: " << ModelCudaUploadedQ40WeightCount(model)
-        << "/" << counts.q4_0 << '\n';
-  }
-  if (counts.q4_1 > 0) {
-    out << indent
-        << "cuda q4_1 Linear weights: " << ModelCudaUploadedQ41WeightCount(model)
-        << "/" << counts.q4_1 << '\n';
-  }
+  out << indent
+      << "cuda q8_0 Linear weights: " << ModelCudaUploadedQ80WeightCount(model)
+      << "/" << counts.q8_0 << '\n';
+  out << indent
+      << "cuda q4_0 Linear weights: " << ModelCudaUploadedQ40WeightCount(model)
+      << "/" << counts.q4_0 << '\n';
+  out << indent
+      << "cuda q4_1 Linear weights: " << ModelCudaUploadedQ41WeightCount(model)
+      << "/" << counts.q4_1 << '\n';
 
   // 缺失权重明确按类型报告；设备常驻路径不支持混用 CPU 权重。
   const auto report_missing = [&](const char* type, size_t expected,
@@ -1122,6 +1116,7 @@ static int RunBench(const LoadedModel& loaded, const CommandOptions& options,
          << std::fixed << std::setprecision(3) << "prefill: " << result.prefill_ms
          << " ms\n"
          << "decode: " << result.decode_ms << " ms\n"
+         << "total: " << result.prefill_ms + result.decode_ms << " ms\n"
          << "throughput: " << result.tokens_per_sec() << " tokens/s\n"
          << "decode throughput: " << result.decode_tokens_per_sec() << " tokens/s\n"
          << "tokens/s (total): " << result.tokens_per_sec() << '\n'

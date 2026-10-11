@@ -19,7 +19,7 @@ except ModuleNotFoundError as error:
     print("NOT RUN: golden-logits requires NumPy", file=sys.stderr)
     raise SystemExit(77)
 
-from compare_logits import compare_logits, read_tokens, step_files
+from compare_logs import compare_logits, read_tokens, step_files
 from make_golden import encode_prompt
 
 
@@ -121,7 +121,7 @@ def check_comparator(directory):
     np.array([0.002, 1], dtype=np.float32).tofile(py)
     np.array([0.0020005, 1], dtype=np.float32).tofile(cpp)
     # Confirm the CLI exposes failures as a nonzero exit status too.
-    result = subprocess.run([sys.executable, str(ROOT / "scripts/compare_logits.py"),
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/compare_logs.py"),
                              "--cpp-dir", str(directory)], capture_output=True, timeout=30)
     if result.returncode == 0:
         raise RuntimeError("comparator CLI returned zero for mismatched logits")
@@ -162,7 +162,7 @@ def main():
                  "--dump-logits", str(cpp_dir)])
             print(run([sys.executable, str(ROOT / "scripts/make_golden.py"),
                        "--model", str(model), "--output-dir", str(py_dir), *common]), end="")
-            print(run([sys.executable, str(ROOT / "scripts/compare_logits.py"),
+            print(run([sys.executable, str(ROOT / "scripts/compare_logs.py"),
                        "--cpp-dir", str(cpp_dir), "--python-dir", str(py_dir)]), end="")
             generated = read_tokens(cpp_dir / "generation_tokens.txt")
             if expected_tokens is not None and generated != expected_tokens:

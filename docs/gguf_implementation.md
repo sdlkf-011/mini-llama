@@ -18,8 +18,8 @@
 ## 测试与构建
 
 - `tests/gguf_test.cc` 位于 `tests` 根目录，覆盖正常加载、类型化元数据、原始张量、仓库 fixture 和损坏输入。
-- `tests/CMakeLists.txt` 为 `tests/unit/gguf_test.cc` 注册 `mini-llama-gguf-tests`，
-  根目录文件对应 `mini-llama-gguf-integration-tests`。
+- `tests/CMakeLists.txt` 为合并后的 `tests/gguf_test.cc` 注册 `mini-llama-gguf-tests`，
+  同时覆盖基础边界和文件集成用例。
 - 生成 fixture：
 
   ```bash

@@ -26,8 +26,8 @@ Matmul/Linear、Ops/Quant Kernel、GPU KV Cache 和 Attention 已有实现。
 | [forward.cc](../src/forward.cc) | 完整快照校验、CPU/设备前向分发、设备算子与缓存串联、运行计数 |
 | [main.cc](../src/main.cc) | CLI 参数、CUDA 诊断和推理接入边界 |
 | [cuda_runtime_test.cc](../tests/cuda_runtime_test.cc) | Runtime、所有权、失败状态及 CLI 行为测试 |
-| [cuda_tensor_test.cc](../tests/cuda_tensor_test.cc) | 空 Tensor、形状与 CPU stub 校验；真实 GPU 上传下载、移动与失败状态保持 |
-| [forward_test.cc](../tests/unit/forward_test.cc)、[cuda_forward_linear_test.cc](../tests/cuda_forward_linear_test.cc) | CPU/完整 GPU 前向、四种 Linear、GQA、bias、KV、快照生命周期与数值对照 |
+| [tensor_test.cc](../tests/tensor_test.cc) | 空 Tensor、形状与 CPU stub 校验；真实 GPU 上传下载、移动与失败状态保持 |
+| [forward_test.cc](../tests/forward_test.cc)、[cuda_forward_linear_test.cc](../tests/cuda_forward_linear_test.cc) | CPU/完整 GPU 前向、四种 Linear、GQA、bias、KV、快照生命周期与数值对照 |
 | [cuda_ops_test.cc](../tests/cuda_ops_test.cc)、[cuda_quant_test.cc](../tests/cuda_quant_test.cc) | 独立算子的 CPU Stub、GPU 数值及量化输入校验 |
 
 ## 后端配置与 CLI

@@ -32,7 +32,7 @@
 
 ## 测试内容
 
-`tests/unit/tensor_test.cc` 有 5 项 Tensor 测试；`tests/unit/ops_test.cc` 有 11 项
+`tests/tensor_test.cc` 有 5 项 Tensor 测试；`tests/ops_test.cc` 有 11 项
 算子测试，分别注册独立 target，覆盖：
 
 - Tensor 构造、填充、索引展开、At 访问器、RowPtr、非法 shape/索引、AssertShape 和 ReshapeChecked。

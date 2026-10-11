@@ -1,3 +1,4 @@
+// 测试目的：验证 ASCII、JSON、BPE 与 GGUF 分词器接口、特殊 token 和编码边界。
 #include "mini_llama/tokenizer.h"
 
 #include <gtest/gtest.h>

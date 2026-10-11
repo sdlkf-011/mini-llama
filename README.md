@@ -125,6 +125,35 @@ CUDA 权重上传由推理命令自动完成，`inspect` 不接受 `--quant`。
 generate/bench 的 CUDA 运行摘要累计当前请求的 prefill + decode；run 的设备
 计数自权重准备后跨轮累计。上传不计入运行拷贝统计。
 
+## 模型与验证脚本
+
+`scripts/` 提供模型准备、Golden logits、CLI 回归和 CUDA 验证入口。
+新增的 tiny 导出使用确定性随机 F32 权重，适合验证推理链路与数值，未经训练。
+
+```bash
+python3 scripts/export_tiny_model.py --output-dir /tmp/mini-llama-demo --seed 42
+python3 scripts/test_mvp.py --binary build/mini-llama --model /tmp/mini-llama-demo
+python3 scripts/test_quant_cli.py --binary build-cuda/mini-llama
+python3 scripts/test_golden.py --binary build/mini-llama
+scripts/test_cuda_asan.sh --help
+```
+
+`generate_vocab_json.py --output PATH` 生成完整 ASCII 词表；
+`upgrade_model_json.py INPUT --output OUTPUT --weights MODEL_BIN` 将旧配置补齐为
+当前 JSON 清单并核对权重长度，已有张量的偏移保持原值。
+`download_demo_model.py` 接受显式 `--url`（单个 GGUF，可加 `--sha256`）或
+`--base-url`（包含 `model.json`、`model.bin`、`vocab.json` 的目录 URL），
+用 `--output-dir` 选择下载位置。输出默认不覆盖已有文件。
+`compare_logs.py` 比较 C++ 与 NumPy 的 logits 导出，仍使用 `--cpp-dir` 和
+`--python-dir` 参数。
+
+CUDA ASan 脚本构建并检查主机侧 AddressSanitizer/UBSan；可在 `--` 后传入
+CMake 工具链参数。`--device-memcheck` 另运行 `compute-sanitizer` 设备内存检查，
+缺少该工具、没有可见 GPU 或必需 GPU 用例被跳过时返回 77，CI 应将其记录为
+未执行。脚本比对 CTest 测试清单与 JUnit 报告，要求 GPU 运行时、张量、算子、
+量化、KV/Attention 和完整前向用例实际执行；报告缺失或测试失败返回非零错误码。
+单 GPU 环境允许跳过多设备用例，外部模型缺失时允许跳过聊天冒烟测试。
+
 ## 功能边界与文档
 
 F32 Linear 仅支持 `[in]` / `[1, in]`，量化 Linear 支持 `[in]` / `[batch, in]`；
@@ -147,6 +176,7 @@ CUDA Prefill 仍逐 token 计算；Context 保留 CPU Cache 的分配，GPU 路�
 - [量化 Linear 与 batch](docs/simd_quantized_linear_implementation.md)
 - [Golden logits 回归](docs/golden_logits_testing.md)
 - [调试与基准](docs/benchmark_debug_implementation.md)
+- [CPU/CUDA Benchmark 报告与远程验收](docs/cuda_benchmark_validation.md)
 - [GGUF Tokenizer](docs/gguf_tokenizer_integration_implementation.md)
 - [Chat Template 与 Run](docs/chat_prompt_run_implementation.md)
 - [后端与 CUDA Runtime 当前状态](docs/backend_selection_cuda_runtime_implementation.md)

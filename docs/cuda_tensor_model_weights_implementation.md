@@ -30,7 +30,7 @@ GPU KV Cache 和设备驻留 decode 属于后续实现；它们现在已经接�
 | [model.h][model-h] | 上传快照、统计查询与模型重新量化接口 |
 | [model.cc][model-cc] | 权重遍历、校验、上传与量化转换 |
 | [forward.cc][forward-cc] | 整理前向包装层，保持 CPU 计算路径 |
-| [cuda_tensor_test.cc][tensor-test] | 空 Tensor、CPU stub 与真实 GPU 测试 |
+| [tensor_test.cc][tensor-test] | 空 Tensor、CPU stub 与真实 GPU 测试 |
 | [forward_test.cc][forward-test] | CPU 前向兼容及 F32/Q8_0 上传测试 |
 | [CMakeLists.txt][cmake] | 将设备 Tensor 加入核心库 |
 | [tests/CMakeLists.txt][test-cmake] | 注册实际存在的 Tensor 与前向测试 |
@@ -246,7 +246,7 @@ CUDA 结果来自允许访问 GPU 的沙箱外运行；沙箱内 Runtime 查询�
 [model-h]: ../include/mini_llama/model.h
 [model-cc]: ../src/model.cc
 [forward-cc]: ../src/forward.cc
-[tensor-test]: ../tests/cuda_tensor_test.cc
-[forward-test]: ../tests/unit/forward_test.cc
+[tensor-test]: ../tests/tensor_test.cc
+[forward-test]: ../tests/forward_test.cc
 [cmake]: ../CMakeLists.txt
 [test-cmake]: ../tests/CMakeLists.txt

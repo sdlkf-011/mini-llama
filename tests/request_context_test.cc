@@ -1,3 +1,4 @@
+// 测试目的：验证请求身份、阶段事件、耗时、错误状态及追踪格式。
 #include "mini_llama/request_context.h"
 
 #include <gtest/gtest.h>

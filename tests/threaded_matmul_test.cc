@@ -1,3 +1,4 @@
+// 测试目的：验证多线程矩阵运算和量化尾块数值、线程池调度及 Attention/KV 一致性。
 #include <gtest/gtest.h>
 
 #include <atomic>

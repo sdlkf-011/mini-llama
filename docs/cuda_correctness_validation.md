@@ -13,8 +13,8 @@ GPU 计算。下列 GPU 项目统一为 **NOT RUN / PENDING GPU VALIDATION**。
 | Tensor/算子 | `cuda_tensor.*`、`cuda_matmul.*`、`cuda_linear.*`、`cuda_ops.*` 覆盖 MatMul、F32 Linear、RMSNorm、SiLU、Add/Mul、Softmax、两种 RoPE | 统一比较诊断；补独立 Embedding 行偏移/边界与大偏移 Softmax |
 | 量化 | `cuda_quant_q8_0.*`、`cuda_quant_q4.*` 覆盖主机/常驻权重/设备输入、bias、尾块、大 batch；同量化块 CPU 对照 | Q4_1 增加向量/batch/多种尾块及非法元数据测试 |
 | KV/Attention | `cuda_kv_cache.*`、`cuda_attention.*` 覆盖读写、位置/头/设备边界、生命周期、GQA、因果端点与独立 CPU 参考 | KV 数值比较复用诊断；保留 Attention 严格绝对阈值 |
-| Forward | `cuda_forward.*`、`cuda_forward_linear.*`、`cuda_forward_attention.*`、`cuda_forward_device_resident.*` | 明确先计算 CPU logits；计数专用 batch 补数值对照；重上传补数值与路径对照；三种量化 Forward 分别注册 |
-| CLI/真实模型 | `scripts/test_backend_cli.py` 已覆盖参数、错误、CPU/CUDA logits、generate/bench/run 和量化 CLI | 新增兼容入口 `tests/backend_cli_test.py`；GPU 量化 CLI 单列跳过；新增 `cuda-chat-smoke` |
+| Forward | `cuda_forward.*`、`cuda_forward_linear.*`、`cuda_forward.CudaForwardAttentionTest.*`、`cuda_forward_device_resident.*` | 明确先计算 CPU logits；计数专用 batch 补数值对照；重上传补数值与路径对照；三种量化 Forward 分别注册 |
+| CLI/真实模型 | `scripts/test_backend_cli.py` 已覆盖参数、错误、CPU/CUDA logits、generate/bench/run 和量化 CLI | CTest 直接调用 `scripts/test_backend_cli.py`；GPU 量化 CLI 单列跳过；新增 `cuda-chat-smoke` |
 | CMake/CTest | CPU 构建使用 CUDA stub，无 SDK 类型泄漏；CUDA ON 编译三个 `.cu` 并链接 cudart/cuBLAS；GTest discover 注册实际用例 | 保持结构；真实模型 smoke 配置超时与跳过码 77；NumPy 缺失时 golden-logits 明确跳过 |
 
 没有独立名为 `cuda_forward_buffer` 或 `cuda_kv_attention` 的 CTest 项。
@@ -96,8 +96,8 @@ cmake -S . -B build -DMINI_LLAMA_CUDA=OFF
 cmake --build build -j4
 ctest --test-dir build --output-on-failure \
   --output-junit /tmp/mini-llama-cuda-correctness-cpu-tests.xml
-MINI_LLAMA_BIN=./build/mini-llama python3 tests/backend_cli_test.py
-MINI_LLAMA_BIN=./build/mini-llama python3 tests/cuda_chat_smoke_test.py
+MINI_LLAMA_BIN=./build/mini-llama python3 scripts/test_backend_cli.py
+MINI_LLAMA_BIN=./build/mini-llama python3 scripts/test_cuda_chat_smoke.py
 ```
 
 | 检查 | 实际结果 |
@@ -154,13 +154,13 @@ cmake --build build-cuda -j4
 
 ctest --test-dir build-cuda --show-only
 ctest --test-dir build-cuda \
-  -R 'cuda_quant_q4|cuda_forward_q4|cuda_forward_quant|cuda_forward_device_resident|cuda_forward_attention|cuda-chat-smoke' \
+  -R 'cuda_quant_q4|cuda_forward_q4|cuda_forward_quant|cuda_forward_device_resident|CudaForwardAttentionTest|cuda-chat-smoke' \
   --output-on-failure --no-tests=error
 
 ctest --test-dir build-cuda --output-on-failure \
   --output-junit /tmp/mini-llama-gpu-tests.xml
-MINI_LLAMA_BIN=./build-cuda/mini-llama python3 tests/backend_cli_test.py
-MINI_LLAMA_BIN=./build-cuda/mini-llama python3 tests/cuda_chat_smoke_test.py
+MINI_LLAMA_BIN=./build-cuda/mini-llama python3 scripts/test_backend_cli.py
+MINI_LLAMA_BIN=./build-cuda/mini-llama python3 scripts/test_cuda_chat_smoke.py
 ./build-cuda/mini-llama generate --model models/chat --backend cuda \
   -p hello -n 8 --seed 1
 ```

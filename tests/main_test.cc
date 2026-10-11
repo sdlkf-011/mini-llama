@@ -1,3 +1,6 @@
+// 测试目的：验证 CLI 命令、参数校验、模型和分词器装配、输出及请求追踪。
+#include "main_test.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -13,35 +16,11 @@
 #include "mini_llama/terminal.h"
 #include "mini_llama/tokenizer.h"
 
-namespace mini_llama {
-int RunMain(int argc, const char* const argv[], std::istream& input,
-            std::ostream& output, std::ostream& error);
-int Run(int argc, const char* const argv[], const MiniLlamaModel& model,
-        const ITokenizer& tokenizer, std::istream& input, std::ostream& output,
-        std::ostream& error);
-}  // namespace mini_llama
-
 namespace {
 
 const std::string kModelDir = MINI_LLAMA_TEST_MODEL_DIR;
 
-struct Result {
-  int status;
-  std::string output;
-  std::string error;
-};
-
-Result Invoke(const std::vector<std::string>& args, const std::string& text = "") {
-  std::vector<const char*> argv;
-  for (const auto& arg : args) {
-    argv.push_back(arg.c_str());
-  }
-  std::istringstream input(text);
-  std::ostringstream output, error;
-  const int status = mini_llama::RunMain(static_cast<int>(argv.size()), argv.data(),
-                                         input, output, error);
-  return {status, output.str(), error.str()};
-}
+using mini_llama::test::Invoke;
 
 class MainTest : public ::testing::Test {
  protected:
@@ -113,6 +92,7 @@ TEST_F(MainTest, BenchmarkCommandPrintsStatisticsAndVerboseDetails) {
   EXPECT_NE(result.output.find("generated tokens: 2"), std::string::npos);
   EXPECT_NE(result.output.find("decode tokens: 1"), std::string::npos);
   EXPECT_NE(result.output.find("decode throughput:"), std::string::npos);
+  EXPECT_NE(result.output.find("total:"), std::string::npos);
   EXPECT_NE(result.error.find("mode=bench status=ok"), std::string::npos);
   EXPECT_NE(result.error.find("decode_tokens=1 generated_tokens=2"),
             std::string::npos);

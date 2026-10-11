@@ -44,7 +44,7 @@ cmake --build build -j 4
 cmake --build build-cuda -j 4
 ctest --test-dir build-cuda -N
 ctest --test-dir build-cuda --output-on-failure \
-  -R 'cuda_forward|cuda_forward_device_resident|cuda_forward_linear|cuda_forward_attention'
+  -R 'cuda_forward|cuda_forward_device_resident|cuda_forward_linear|CudaForwardAttentionTest'
 ctest --test-dir build --output-on-failure -j 4 \
   --output-junit /tmp/mini-llama-specified-decode-cpu-full.xml
 ctest --test-dir build-cuda --output-on-failure -j 4 \

@@ -1,3 +1,4 @@
+// 测试目的：验证贪心和温度采样、seed 复现、top-k/top-p 过滤及非法输入。
 #include "mini_llama/sampler.h"
 
 #include <gtest/gtest.h>

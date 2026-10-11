@@ -1,3 +1,4 @@
+// 测试目的：验证 CPU 前向数值、批量与逐 token 等价性、KV 状态及后端分发。
 #include "mini_llama/forward.h"
 
 #include <gtest/gtest.h>

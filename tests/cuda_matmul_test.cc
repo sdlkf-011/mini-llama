@@ -1,3 +1,4 @@
+// 测试目的：验证 CUDA 矩阵乘和 Linear 的行主序映射、设备串联、bias 与输入校验。
 #include "mini_llama/cuda_matmul.h"
 
 #include <gtest/gtest.h>
@@ -7,8 +8,8 @@
 #include <stdexcept>
 #include <string>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/ops.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;
