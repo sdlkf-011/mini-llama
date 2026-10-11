@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -317,6 +318,144 @@ class BackendCliTest(unittest.TestCase):
         self.require_gpu()
         self.failure("generate", "--backend", "cuda", "--device", "2147483647",
                      contains="out of range")
+
+
+@unittest.skipUnless(os.name == "posix", "CUDA ASan entry point requires Bash")
+class CudaAsanScriptTest(unittest.TestCase):
+    """Exercise the shell acceptance gate without a CUDA SDK or real GPU."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="mini-llama-asan-gate-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.tools = self.directory / "tools"
+        self.build = self.directory / "build"
+        self.tools.mkdir()
+        self.build.mkdir()
+        self.write_program(self.tools / "cmake", "raise SystemExit(0)")
+        self.write_program(self.build / "mini-llama", '''
+import os
+print("CUDA backend built: yes")
+count = os.environ.get("TEST_GPU_COUNT", "1")
+if count != "missing":
+    print("CUDA GPU count: " + count)
+raise SystemExit(int(os.environ.get("TEST_INFO_EXIT", "0")))
+''')
+        self.write_program(self.tools / "ctest", '''
+import json
+import os
+from pathlib import Path
+import sys
+import xml.etree.ElementTree as ET
+Path(os.environ["TEST_CTEST_CALLED"]).touch()
+names = [
+    "cuda_runtime.CudaRuntimeGpuTest.RawHostDeviceAndDeviceDeviceCopiesRoundTrip",
+    "CudaTensorGpuTest.RoundTripAndMovesPreserveTensorState",
+    "cuda_matmul.NonSquareRowMajorMapping",
+    "cuda_linear.HostVectorAndBatchWithOptionalBias",
+    "cuda_ops.CudaOpsGpu.HostAndDeviceOpsMatchCpu",
+    "cuda_quant_q8_0.LargeBatchAllEntrypointsMatchCpu",
+    "cuda_quant_q4.LargeBatchQ40AllEntrypointsMatchCpu",
+    "cuda_kv_cache.CudaKvCacheGpuTest.LayoutHostDeviceReadAndClearMatchCpu",
+    "cuda_attention.CudaAttentionGpuTest.HostAndDeviceGqaMatchIndependentReference",
+    "cuda_forward.CudaForwardTest.SingleAndMultipleTokensDownloadOnly128Logits",
+    "cuda_forward.CudaForwardAttentionTest.CoversAllLayersGqaAndOptionalBias",
+    "cuda_forward_device_resident.CudaForwardBufferTest.FlatAndHeadShapedDeviceWritesMatch",
+    "cuda_forward_linear.CudaForwardLinearTest.ResidentF32ProjectionsMatchCpuPrefillAndDecode",
+    "cuda_forward_linear.cuda_forward_quant.Q80ProjectionsRemainResident",
+    "cuda_forward_linear.cuda_forward_q4.Q40ProjectionsRemainResident",
+    "cuda_runtime.CudaRuntimeGpuTest.BuffersRetainTheirDeviceAcrossOtherDeviceOperations",
+    "cuda_quant_q8_0_stub.AllEntrypointsRejectCpuOnlyBuild",
+    "cuda-chat-smoke",
+]
+mode = os.environ.get("TEST_REPORT_MODE", "passed")
+if "--show-only=json-v1" in sys.argv:
+    print(json.dumps({"tests": [{"name": name} for name in names]}))
+    raise SystemExit(0)
+if "--output-junit" in sys.argv and mode != "absent":
+    output = Path(sys.argv[sys.argv.index("--output-junit") + 1])
+    if mode == "malformed":
+        output.write_text("not XML")
+    else:
+        suite = ET.Element("testsuite")
+        for i, name in enumerate(names):
+            if mode == "missing" and i == 4 or mode == "missing-case" and i == 15:
+                continue
+            case = ET.SubElement(suite, "testcase", name=name, status="run")
+            if (mode == "all-skipped" or i >= 16
+                    or i == 15 and mode != "multi-passed"
+                    or mode == "one-skipped" and i == 3):
+                case.set("status", "notrun")
+                ET.SubElement(case, "skipped")
+        ET.ElementTree(suite).write(output)
+print("100% tests passed, 0 tests failed")
+raise SystemExit(int(os.environ.get("TEST_CTEST_EXIT", "0")))
+''')
+
+    def write_program(self, path, body):
+        path.write_text(f"#!{sys.executable}\n" + body + "\n")
+        path.chmod(0o755)
+
+    def run_gate(self, **overrides):
+        env = {**os.environ, "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+               "TEST_CTEST_CALLED": str(self.directory / "ctest-called"), **overrides}
+        return subprocess.run(["bash", str(ROOT / "scripts/test_cuda_asan.sh"),
+                               "--build-dir", str(self.build)], env=env,
+                              capture_output=True, text=True, timeout=30)
+
+    # CUDA 已编译但没有可见设备时，必须在 CTest 之前返回未执行状态。
+    def test_zero_devices_is_not_validation(self):
+        result = self.run_gate(TEST_GPU_COUNT="0", CUDA_VISIBLE_DEVICES="-1")
+        self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+        self.assertFalse((self.directory / "ctest-called").exists())
+
+    # 诊断缺少设备数或命令失败时，不得继续验收测试。
+    def test_bad_device_diagnostics_fail(self):
+        for options in ({"TEST_GPU_COUNT": "missing"}, {"TEST_INFO_EXIT": "3"}):
+            with self.subTest(options=options):
+                result = self.run_gate(**options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.directory / "ctest-called").exists())
+
+    # CTest 退出零但全部或部分必需 GPU 用例被跳过时，仍返回未执行状态。
+    def test_required_gpu_skips_are_not_validation(self):
+        for mode in ("all-skipped", "one-skipped"):
+            with self.subTest(mode=mode):
+                result = self.run_gate(TEST_REPORT_MODE=mode)
+                self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+
+    # 未生成报告、报告损坏或缺失必需 GPU 模块都不能得到验收成功。
+    def test_incomplete_reports_fail(self):
+        for mode in ("absent", "malformed", "missing"):
+            with self.subTest(mode=mode):
+                result = self.run_gate(TEST_REPORT_MODE=mode)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotEqual(result.returncode, 77)
+
+    # 单 GPU 可以跳过多设备用例、CPU stub 和依赖外部模型的聊天冒烟测试。
+    def test_single_gpu_execution_passes(self):
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    # 可见两张设备时，多设备用例也必须实际执行。
+    def test_multi_gpu_skip_is_not_validation(self):
+        result = self.run_gate(TEST_GPU_COUNT="2")
+        self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+
+    # 两张可见设备下，实际执行多设备用例才能通过完整验证。
+    def test_multi_gpu_execution_passes(self):
+        result = self.run_gate(TEST_GPU_COUNT="2", TEST_REPORT_MODE="multi-passed")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    # 同一 fixture 的其他用例通过，也不能掩盖必需多设备用例的结果缺失。
+    def test_missing_individual_gpu_result_fails(self):
+        result = self.run_gate(TEST_GPU_COUNT="2", TEST_REPORT_MODE="missing-case")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    # CTest 自身失败时保留非零退出码，不以报告校验掩盖失败。
+    def test_ctest_failure_is_preserved(self):
+        result = self.run_gate(TEST_CTEST_EXIT="8")
+        self.assertEqual(result.returncode, 8)
 
 
 if __name__ == "__main__":

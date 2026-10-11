@@ -149,7 +149,10 @@ scripts/test_cuda_asan.sh --help
 
 CUDA ASan 脚本构建并检查主机侧 AddressSanitizer/UBSan；可在 `--` 后传入
 CMake 工具链参数。`--device-memcheck` 另运行 `compute-sanitizer` 设备内存检查，
-缺少该工具时返回 77。
+缺少该工具、没有可见 GPU 或必需 GPU 用例被跳过时返回 77，CI 应将其记录为
+未执行。脚本比对 CTest 测试清单与 JUnit 报告，要求 GPU 运行时、张量、算子、
+量化、KV/Attention 和完整前向用例实际执行；报告缺失或测试失败返回非零错误码。
+单 GPU 环境允许跳过多设备用例，外部模型缺失时允许跳过聊天冒烟测试。
 
 ## 功能边界与文档
 
