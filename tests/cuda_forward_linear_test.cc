@@ -54,6 +54,9 @@ TEST_F(CudaForwardLinearTest, EmptyOptionalBiasStorageIsOmitted) {
 TEST_F(CudaForwardLinearTest, ResidentF32ProjectionsMatchCpuPrefillAndDecode) {
   MiniLlamaModel cpu_model = MakeModel();
   MiniLlamaModel cuda_model = cpu_model;
+  MiniLlamaContext cpu_ctx(&cpu_model), cuda_ctx(&cuda_model);
+  const auto prefill = MiniBatch::FromTokens({0, 2});
+  const auto prefill_expected = ForwardBatch(cpu_ctx, cpu_model, prefill);
   UploadModelWeightsToCuda(cuda_model, 0);
   ASSERT_EQ(ModelCudaUploadedWeightCount(cuda_model), 21u);
   ASSERT_EQ(ModelCudaUploadedF32WeightCount(cuda_model), 15u);
@@ -63,11 +66,9 @@ TEST_F(CudaForwardLinearTest, ResidentF32ProjectionsMatchCpuPrefillAndDecode) {
   for (const auto& weight : snapshot->weights) {
     pointers.push_back(weight.buffer.data());
   }
-  MiniLlamaContext cpu_ctx(&cpu_model), cuda_ctx(&cuda_model);
   ResetModelCudaRuntimeStats(cuda_model);
-  const auto prefill = MiniBatch::FromTokens({0, 2});
-  RequireCloseTensor(ForwardBatch(cuda_ctx, cuda_model, prefill),
-                     ForwardBatch(cpu_ctx, cpu_model, prefill), 1e-4f);
+  RequireCloseTensor(ForwardBatch(cuda_ctx, cuda_model, prefill), prefill_expected,
+                     1e-4f, 1e-4f, "prefill logits");
   RequireDeviceStats(cuda_model, 2);
   // 将 CPU 投影副本置零作为上传探针：Decode 仍应读取已有显存快照。
   // 如果重新上传 CPU 权重或回退到 CPU，结果会偏离未修改的 Golden。
@@ -90,10 +91,11 @@ TEST_F(CudaForwardLinearTest, ResidentF32ProjectionsMatchCpuPrefillAndDecode) {
     std::fill(layer.ffn_norm.data.begin(), layer.ffn_norm.data.end(), 0.0f);
   }
   // Decode 单步独立计数，初始化与静态权重上传均不在此范围。
-  ResetModelCudaRuntimeStats(cuda_model);
   const auto decode = MiniBatch::Single(4, 2);
-  RequireCloseTensor(ForwardBatch(cuda_ctx, cuda_model, decode),
-                     ForwardBatch(cpu_ctx, cpu_model, decode), 1e-4f);
+  const auto decode_expected = ForwardBatch(cpu_ctx, cpu_model, decode);
+  ResetModelCudaRuntimeStats(cuda_model);
+  RequireCloseTensor(ForwardBatch(cuda_ctx, cuda_model, decode), decode_expected,
+                     1e-4f, 1e-4f, "decode logits");
   for (int l = 0; l < cpu_model.config.n_layers; ++l) {
     for (int p = 0; p <= 2; ++p) {
       Tensor k({2, 4}), v(k.shape);
@@ -129,14 +131,13 @@ TEST_F(CudaForwardLinearTest, ResidentWeightsAreUsedUntilSnapshotIsCleared) {
   MiniLlamaContext cpu_ctx(&cpu_model), uploaded_ctx(&uploaded_model);
   ResetModelCudaRuntimeStats(uploaded_model);
   const auto batch = MiniBatch::Single(1, 0);
-  RequireCloseTensor(ForwardBatch(uploaded_ctx, uploaded_model, batch),
-                     ForwardBatch(cpu_ctx, cpu_model, batch));
+  const auto expected = ForwardBatch(cpu_ctx, cpu_model, batch);
+  RequireCloseTensor(ForwardBatch(uploaded_ctx, uploaded_model, batch), expected);
   RequireDeviceStats(uploaded_model, 1);
   ClearModelCudaWeights(uploaded_model);
   ASSERT_FALSE(ModelHasCudaWeights(uploaded_model));
   MiniLlamaContext cleared_ctx(&uploaded_model);
-  RequireCloseTensor(ForwardBatch(cleared_ctx, uploaded_model, batch),
-                     ForwardBatch(cpu_ctx, cpu_model, batch));
+  RequireCloseTensor(ForwardBatch(cleared_ctx, uploaded_model, batch), expected);
   EXPECT_EQ(ModelCudaLinearCalls(uploaded_model), 0u);
   EXPECT_EQ(ModelCudaHostToDeviceCopies(uploaded_model), 0u);
   EXPECT_EQ(ModelCudaDeviceToHostCopies(uploaded_model), 0u);
@@ -166,50 +167,72 @@ TEST_F(CudaForwardLinearTest, ReuploadAndClearRespectSharedOwnership) {
 }
 
 // 同一量化权重在 CPU/GPU 上对照，覆盖逐行尾块及所有 Transformer 投影。
-TEST_F(CudaForwardLinearTest, AllQuantizedProjectionsRemainResident) {
-  for (QuantType type : {QuantType::kQ80, QuantType::kQ40, QuantType::kQ41}) {
-    auto cpu_model = MakeModel(2, true);
-    auto quantize = [&](QuantizedTensor& w) {
-      const Tensor dense = ToTensor(w);
-      w.f32_data.clear();
-      w.type = type;
-      if (type == QuantType::kQ80) {
-        w.q8_0_data = QuantizeToQ80(dense);
-      }
-      if (type == QuantType::kQ40) {
-        w.q4_0_data = QuantizeToQ40(dense);
-      }
-      if (type == QuantType::kQ41) {
-        // 复用打包值，指定非零 FP16 缩放与偏移，验证 d*q+m。
-        auto q40 = QuantizeToQ40(dense);
-        w.q4_1_data.resize(q40.size());
-        for (size_t i = 0; i < q40.size(); ++i) {
-          auto& q = w.q4_1_data[i];
-          q.d = 0x2800;  // FP16 0.03125
-          q.m = 0xb000;  // FP16 -0.125
-          std::copy_n(q40[i].qs, 16, q.qs);
-        }
-      }
-    };
-    quantize(cpu_model.lm_head);
-    for (auto& l : cpu_model.layers) {
-      for (auto* w : {&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down}) {
-        quantize(*w);
+void VerifyQuantizedForward(QuantType type) {
+  SCOPED_TRACE(static_cast<int>(type));
+  auto cpu_model = MakeModel(2, true);
+  auto quantize = [&](QuantizedTensor& w) {
+    const Tensor dense = ToTensor(w);
+    w.f32_data.clear();
+    w.type = type;
+    if (type == QuantType::kQ80) {
+      w.q8_0_data = QuantizeToQ80(dense);
+    }
+    if (type == QuantType::kQ40) {
+      w.q4_0_data = QuantizeToQ40(dense);
+    }
+    if (type == QuantType::kQ41) {
+      // 复用打包值，指定非零 FP16 缩放与偏移，验证 d*q+m。
+      auto q40 = QuantizeToQ40(dense);
+      w.q4_1_data.resize(q40.size());
+      for (size_t i = 0; i < q40.size(); ++i) {
+        auto& q = w.q4_1_data[i];
+        q.d = 0x2800;  // FP16 0.03125
+        q.m = 0xb000;  // FP16 -0.125
+        std::copy_n(q40[i].qs, 16, q.qs);
       }
     }
-    auto cuda_model = cpu_model;
-    UploadModelWeightsToCuda(cuda_model);
-    EXPECT_EQ(ModelCudaUploadedF32WeightCount(cuda_model), 0u);
-    EXPECT_EQ(ModelCudaMemoryBytes(cuda_model), ModelWeightBytes(cpu_model));
-    MiniLlamaContext cpu(&cpu_model), gpu(&cuda_model);
-    ResetModelCudaRuntimeStats(cuda_model);
-    for (int pos = 0; pos < 4; ++pos) {
-      SCOPED_TRACE(pos);
-      auto batch = MiniBatch::Single(pos, pos);
-      RequireCloseTensor(ForwardBatch(gpu, cuda_model, batch),
-                         ForwardBatch(cpu, cpu_model, batch), 3e-4f);
+  };
+  quantize(cpu_model.lm_head);
+  for (auto& l : cpu_model.layers) {
+    for (auto* w : {&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down}) {
+      quantize(*w);
     }
-    RequireDeviceStats(cuda_model, 4);
   }
+  auto cuda_model = cpu_model;
+  MiniLlamaContext cpu(&cpu_model), gpu(&cuda_model);
+  std::vector<Tensor> expected;
+  for (int pos = 0; pos < 4; ++pos) {
+    expected.push_back(ForwardBatch(cpu, cpu_model, MiniBatch::Single(pos, pos)));
+  }
+  UploadModelWeightsToCuda(cuda_model);
+  EXPECT_EQ(ModelCudaUploadedF32WeightCount(cuda_model), 0u);
+  EXPECT_EQ(ModelCudaUploadedQ80WeightCount(cuda_model),
+            type == QuantType::kQ80 ? 15u : 0u);
+  EXPECT_EQ(ModelCudaUploadedQ40WeightCount(cuda_model),
+            type == QuantType::kQ40 ? 15u : 0u);
+  EXPECT_EQ(ModelCudaUploadedQ41WeightCount(cuda_model),
+            type == QuantType::kQ41 ? 15u : 0u);
+  EXPECT_EQ(ModelCudaMemoryBytes(cuda_model), ModelWeightBytes(cpu_model));
+  ResetModelCudaRuntimeStats(cuda_model);
+  for (int pos = 0; pos < 4; ++pos) {
+    SCOPED_TRACE(pos);
+    auto batch = MiniBatch::Single(pos, pos);
+    RequireCloseTensor(ForwardBatch(gpu, cuda_model, batch), expected[pos], 3e-4f,
+                       3e-4f, "quantized logits");
+  }
+  RequireDeviceStats(cuda_model, 4);
+}
+
+using cuda_forward_quant = CudaGpuTest;
+using cuda_forward_q4 = CudaGpuTest;
+
+TEST_F(cuda_forward_quant, Q80ProjectionsRemainResident) {
+  VerifyQuantizedForward(QuantType::kQ80);
+}
+TEST_F(cuda_forward_q4, Q40ProjectionsRemainResident) {
+  VerifyQuantizedForward(QuantType::kQ40);
+}
+TEST_F(cuda_forward_q4, Q41ProjectionsRemainResident) {
+  VerifyQuantizedForward(QuantType::kQ41);
 }
 }  // namespace

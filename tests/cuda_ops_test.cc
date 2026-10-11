@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "cuda_forward_test_utils.h"
 #include "mini_llama/ops.h"
 
 namespace {
@@ -13,12 +14,7 @@ using namespace mini_llama;
 
 // 数值对照同时校验形状和有限值；此处小幅输入使用固定绝对容差
 void Close(const Tensor& actual, const Tensor& expected) {
-  ASSERT_EQ(actual.shape, expected.shape);
-  ASSERT_EQ(actual.size(), expected.size());
-  for (size_t i = 0; i < actual.size(); ++i) {
-    ASSERT_TRUE(std::isfinite(actual.data[i]));
-    EXPECT_NEAR(actual.data[i], expected.data[i], 2e-5f);
-  }
+  mini_llama::test::RequireCloseTensor(actual, expected, 2e-5f, 0.0f, "cuda_ops");
 }
 
 // 测试目的：CPU 构建中的全部 Ops 主机/设备入口均抛异常，不访问无效设备指针
@@ -105,6 +101,31 @@ TEST_F(CudaOpsGpu, HostAndDeviceOpsMatchCpu) {
     Close(q, eq);
     Close(k, ek);
   }
+}
+
+// 独立验证设备 Embedding 行偏移和边界，不依赖后续投影掩盖取错行。
+TEST_F(CudaOpsGpu, EmbeddingAndLargeShiftSoftmaxMatchCpu) {
+  const Tensor embedding = mini_llama::test::Values({7, 35});
+  auto weight = CudaTensorFromHost(embedding);
+  for (int token : {0, 3, 6}) {
+    SCOPED_TRACE(token);
+    Tensor expected({35});
+    std::copy_n(embedding.RowPtr(token), 35, expected.data.begin());
+    mini_llama::test::RequireCloseTensor(
+        CudaEmbeddingLookupDeviceWeight(weight.data(), embedding.shape, token)
+            .Download(),
+        expected, 0.0f, 0.0f, "embedding");
+  }
+  for (int token : {-1, 7}) {
+    EXPECT_THROW(
+        CudaEmbeddingLookupDeviceWeight(weight.data(), embedding.shape, token),
+        std::out_of_range);
+  }
+  Tensor scores({257});
+  for (size_t i = 0; i < scores.size(); ++i) {
+    scores.data[i] = 10000.0f - static_cast<float>(i);
+  }
+  Close(CudaSoftmax(scores), Softmax(scores));
 }
 
 // shape 不变而 data 截断或增长时，应在任何 CUDA 操作前拒绝上传。

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "cuda_forward_test_utils.h"
 #include "mini_llama/kv_cache.h"
 
 namespace {
@@ -98,10 +99,13 @@ TEST_F(CudaAttentionGpuTest, HostAndDeviceGqaMatchIndependentReference) {
                           .Download();
         EXPECT_EQ(host.shape, q.shape);
         EXPECT_EQ(device.shape, (std::vector<int>{heads * dim}));
-        for (size_t i = 0; i < expected.size(); ++i) {
-          EXPECT_NEAR(host.data[i], expected.data[i], 1e-4f);
-          EXPECT_NEAR(device.data[i], expected.data[i], 1e-4f);
-        }
+        SCOPED_TRACE("layer=" + std::to_string(layer) + " pos=" +
+                     std::to_string(pos) + " head_dim=" + std::to_string(dim));
+        mini_llama::test::RequireCloseTensor(host, expected, 1e-4f, 0.0f,
+                                             "attention host");
+        mini_llama::test::RequireCloseTensor(
+            device, expected.ReshapeChecked({heads * dim}, "attention reference"),
+            1e-4f, 0.0f, "attention device");
       }
     }
   }

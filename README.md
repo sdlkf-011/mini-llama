@@ -151,6 +151,7 @@ CUDA Prefill 仍逐 token 计算；Context 保留 CPU Cache 的分配，GPU 路�
 - [Chat Template 与 Run](docs/chat_prompt_run_implementation.md)
 - [后端与 CUDA Runtime 当前状态](docs/backend_selection_cuda_runtime_implementation.md)
 - [设备驻留 CUDA Decode 与验证](docs/device_resident_cuda_decode.md)
+- [CUDA 正确性审计与待部署服务器验证指南](docs/cuda_correctness_validation.md)
 - [CUDA KV Cache 与 Attention](docs/cuda_kv_cache_implementation.md)
 - [cuBLAS F32 Matmul / Linear 阶段记录](docs/cublas_f32_linear_implementation.md)
 - [CUDA Ops / Quant 阶段记录](docs/cuda_ops_quant_implementation.md)

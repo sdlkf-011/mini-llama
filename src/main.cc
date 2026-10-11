@@ -334,7 +334,7 @@ static void PrintCudaExecutionSummary(const MiniLlamaModel& model,
   const auto counts = ModelLinearWeightTypeCounts(model);
   out << indent
       << "cuda f32 Linear weights: " << ModelCudaUploadedF32WeightCount(model) << "/"
-      << counts.total() << '\n';
+      << counts.f32 << '\n';
   if (counts.q8_0 > 0) {
     out << indent
         << "cuda q8_0 Linear weights: " << ModelCudaUploadedQ80WeightCount(model)
@@ -351,14 +351,20 @@ static void PrintCudaExecutionSummary(const MiniLlamaModel& model,
         << "/" << counts.q4_1 << '\n';
   }
 
-  // 缺失量化权重会在 Forward 明确报错，不将其显示为可用的 CPU 回退
-  if (ModelCudaUploadedF32WeightCount(model) +
-          ModelCudaUploadedQ80WeightCount(model) +
-          ModelCudaUploadedQ40WeightCount(model) +
-          ModelCudaUploadedQ41WeightCount(model) !=
-      counts.total()) {
-    out << indent << "cuda weights incomplete: CUDA forward will report an error\n";
-  }
+  // 缺失权重明确按类型报告；设备常驻路径不支持混用 CPU 权重。
+  const auto report_missing = [&](const char* type, size_t expected,
+                                  size_t uploaded) {
+    if (uploaded < expected) {
+      out << indent << "cuda " << type
+          << " Linear weights missing: " << expected - uploaded
+          << "; CPU fallback unavailable in device-resident forward; "
+             "CUDA forward will report an error\n";
+    }
+  };
+  report_missing("f32", counts.f32, ModelCudaUploadedF32WeightCount(model));
+  report_missing("q8_0", counts.q8_0, ModelCudaUploadedQ80WeightCount(model));
+  report_missing("q4_0", counts.q4_0, ModelCudaUploadedQ40WeightCount(model));
+  report_missing("q4_1", counts.q4_1, ModelCudaUploadedQ41WeightCount(model));
 }
 
 // 执行摘要累计当前推理的 Prefill + Decode，不包含模型权重上传

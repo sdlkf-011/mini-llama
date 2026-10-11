@@ -38,6 +38,7 @@ function(add_unit_test test_name test_source)
 endfunction()
 
 add_unit_test(mini-llama-batch-tests unit/batch_test.cc)
+add_unit_test(mini-llama-cuda-comparison-tests cuda_test_utils_test.cc)
 add_unit_test(mini-llama-cuda-runtime-tests cuda_runtime_test.cc "cuda_runtime.")
 
 add_unit_test(mini-llama-cuda-tensor-tests cuda_tensor_test.cc "cuda_tensor.")

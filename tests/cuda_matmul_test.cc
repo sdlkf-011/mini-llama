@@ -7,23 +7,13 @@
 #include <stdexcept>
 #include <string>
 
+#include "cuda_forward_test_utils.h"
 #include "mini_llama/ops.h"
 
 namespace {
 using namespace mini_llama;
 
-// 测试自包含：不依赖额外的 CUDA 测试辅助头文件。
-void RequireCloseTensor(const Tensor& actual, const Tensor& golden,
-                        float tolerance = 2e-5f) {
-  ASSERT_EQ(actual.shape, golden.shape);
-  ASSERT_EQ(actual.size(), golden.size());
-  for (size_t i = 0; i < actual.size(); ++i) {
-    ASSERT_TRUE(std::isfinite(actual.data[i])) << "element " << i;
-    EXPECT_NEAR(actual.data[i], golden.data[i],
-                tolerance * std::max(1.0f, std::abs(golden.data[i])))
-        << "element " << i;
-  }
-}
+using mini_llama::test::RequireCloseTensor;
 
 Tensor Values(const std::vector<int>& shape, float phase = 0) {
   Tensor result(shape);

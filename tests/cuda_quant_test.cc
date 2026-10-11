@@ -2,11 +2,11 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
 
+#include "cuda_forward_test_utils.h"
 #include "mini_llama/quant.h"
 
 namespace {
@@ -43,14 +43,7 @@ Tensor Values(const std::vector<int>& shape) {
 
 // 先检查 shape 和有限值，再用绝对/相对组合容差比较同格式 CPU 参考结果
 void Close(const Tensor& actual, const Tensor& expected) {
-  ASSERT_EQ(actual.shape, expected.shape);
-  ASSERT_EQ(actual.size(), expected.size());
-  for (size_t i = 0; i < actual.size(); ++i) {
-    ASSERT_TRUE(std::isfinite(actual.data[i]));
-    EXPECT_NEAR(actual.data[i], expected.data[i],
-                2e-5f * std::max(1.0f, std::abs(expected.data[i])))
-        << i;
-  }
+  mini_llama::test::RequireCloseTensor(actual, expected, 2e-5f, 2e-5f, "cuda_quant");
 }
 
 // 三种数据位置复用同一份量化块作为 CPU 参考，避免把量化误差算作 CUDA 误差
@@ -186,6 +179,28 @@ TEST_F(cuda_quant_q4, VectorBatchTailBiasAndResidentInputMatchCpu) {
     const std::vector<int> shape{7, width};
     Verify(QuantizeToQ40(Values(shape)), shape, LinearQ40, CudaQ40Linear,
            CudaQ40LinearDeviceWeight, CudaQ40LinearDeviceInput);
+  }
+}
+
+// Q4_1 没有通用重量化器；手工 d/m/打包值对照同块 CPU 解码，含逐行尾块。
+TEST_F(cuda_quant_q4, Q41VectorBatchTailBiasAndValidationMatchCpu) {
+  for (int width : {16, 32, 35, 64, 86}) {
+    const std::vector<int> shape{7, width};
+    std::vector<BlockQ41> blocks(7 * ((width + 31) / 32));
+    for (size_t b = 0; b < blocks.size(); ++b) {
+      blocks[b].d = 0x3000;  // FP16 0.125
+      blocks[b].m = 0xb800;  // FP16 -0.5
+      for (int i = 0; i < 16; ++i) {
+        blocks[b].qs[i] = ((i + b) % 16) | (((15 - i + b) % 16) << 4);
+      }
+    }
+    SCOPED_TRACE(width);
+    Verify(blocks, shape, LinearQ41, CudaQ41Linear, CudaQ41LinearDeviceWeight,
+           CudaQ41LinearDeviceInput);
+    if (width == 35) {
+      Reject(blocks, CudaQ41Linear, CudaQ41LinearDeviceWeight,
+             CudaQ41LinearDeviceInput);
+    }
   }
 }
 

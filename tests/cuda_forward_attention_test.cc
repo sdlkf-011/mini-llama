@@ -12,17 +12,19 @@ using CudaForwardAttentionTest = CudaGpuTest;
 // 和可选 bias 结果一致；运行计数须随真实层数和 token 数变化
 TEST_F(CudaForwardAttentionTest, CoversAllLayersGqaAndOptionalBias) {
   for (int layers : {1, 3}) {
+    SCOPED_TRACE(layers);
     MiniLlamaModel cpu_model = MakeModel(layers, true);
     cpu_model.config.rope_type = RopeType::kNeoX;
     MiniLlamaModel cuda_model = cpu_model;
+    MiniLlamaContext cpu_ctx(&cpu_model), cuda_ctx(&cuda_model);
+    const auto batch = MiniBatch::FromTokens({0, 2, 4});
+    const auto expected = ForwardBatch(cpu_ctx, cpu_model, batch);
     UploadModelWeightsToCuda(cuda_model);
     EXPECT_EQ(ModelCudaUploadedWeightCount(cuda_model), 3u + 12u * layers);
     EXPECT_EQ(ModelCudaUploadedF32WeightCount(cuda_model), 1u + 7u * layers);
-    MiniLlamaContext cpu_ctx(&cpu_model), cuda_ctx(&cuda_model);
     ResetModelCudaRuntimeStats(cuda_model);
-    const auto batch = MiniBatch::FromTokens({0, 2, 4});
-    RequireCloseTensor(ForwardBatch(cuda_ctx, cuda_model, batch),
-                       ForwardBatch(cpu_ctx, cpu_model, batch), 1e-4f);
+    RequireCloseTensor(ForwardBatch(cuda_ctx, cuda_model, batch), expected, 1e-4f,
+                       1e-4f, "GQA logits");
     RequireDeviceStats(cuda_model, 3);
   }
 }
@@ -31,7 +33,9 @@ TEST_F(CudaForwardAttentionTest, CoversAllLayersGqaAndOptionalBias) {
 // 重放前缀复用已有缓存，缺失历史的位置应报错，合法后续位置仍与 CPU 一致。
 TEST_F(CudaForwardAttentionTest, HistoryReadsRespectGqaAndPrefixReplay) {
   for (RopeType rope : {RopeType::kNormal, RopeType::kNeoX}) {
+    SCOPED_TRACE(static_cast<int>(rope));
     for (int kv_heads : {1, 2, 4}) {
+      SCOPED_TRACE(kv_heads);
       auto cpu = MakeModel(2, true);
       cpu.config.n_kv_heads = kv_heads;
       cpu.config.rope_type = rope;
@@ -49,8 +53,10 @@ TEST_F(CudaForwardAttentionTest, HistoryReadsRespectGqaAndPrefixReplay) {
       size_t positions = 0;
       for (int p = 0; p < 4; ++p) {
         const auto batch = MiniBatch::Single(p, p);
-        RequireCloseTensor(ForwardBatch(g, gpu, batch), ForwardBatch(c, cpu, batch),
-                           2e-4f);
+        SCOPED_TRACE(p);
+        const auto expected = ForwardBatch(c, cpu, batch);
+        RequireCloseTensor(ForwardBatch(g, gpu, batch), expected, 2e-4f, 2e-4f,
+                           "decode logits");
         positions += p + 1;
       }
       RequireDeviceStats(gpu, 4);
@@ -61,14 +67,16 @@ TEST_F(CudaForwardAttentionTest, HistoryReadsRespectGqaAndPrefixReplay) {
       // 回退重放分支，旧后缀不能作为未计算位置的有效历史。
       g.token_history.resize(1);
       c.token_history.resize(1);
-      RequireCloseTensor(ForwardBatch(g, gpu, MiniBatch::Single(6, 1)),
-                         ForwardBatch(c, cpu, MiniBatch::Single(6, 1)), 2e-4f);
+      const auto replay = ForwardBatch(c, cpu, MiniBatch::Single(6, 1));
+      RequireCloseTensor(ForwardBatch(g, gpu, MiniBatch::Single(6, 1)), replay,
+                         2e-4f, 2e-4f, "replay logits");
       EXPECT_EQ(g.cuda_kv_cache.keys_data(), keys);
       EXPECT_EQ(g.token_history.size(), 2u);
       EXPECT_THROW(ForwardBatch(g, gpu, MiniBatch::Single(3, 3)),
                    std::runtime_error);
-      RequireCloseTensor(ForwardBatch(g, gpu, MiniBatch::Single(5, 2)),
-                         ForwardBatch(c, cpu, MiniBatch::Single(5, 2)), 2e-4f);
+      const auto continuation = ForwardBatch(c, cpu, MiniBatch::Single(5, 2));
+      RequireCloseTensor(ForwardBatch(g, gpu, MiniBatch::Single(5, 2)), continuation,
+                         2e-4f, 2e-4f, "continuation logits");
     }
   }
 }
