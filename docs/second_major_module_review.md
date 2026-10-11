@@ -828,7 +828,8 @@ mini-llama       进程级 CLI
 资源解析器吞掉。
 
 资源选项包括 `--model/-m`、`--config`、`--weights`、`--vocab`、`--tokenizer`；
-当前还接入 `bench`、`--cuda-info`、`--threads`、`--backend` 与 `--device`。
+当前还接入 `bench`、`--cuda-info`、`--threads`、`--backend`、`--device` 和
+推理命令的 `--quant q8_0|q4_0`。
 生成选项包括 `--prompt/-p`、`--max-tokens/--n-predict/-n`、`--temperature`、
 `--top-k`、`--seed`，`generate` 还接受 `--dump-logits`。
 
@@ -1364,16 +1365,19 @@ stats：交互会话累计消息、上下文和吞吐
 ### 性能与内存
 
 - 三种量化 Linear 已支持 batch 与外层并行；Q8_0/Q4_0 可用 NEON，Q4_1
-  点积为 scalar。整模型重量化到 Q8_0/Q4_0 已有库接口，未接入 CLI。
+  点积为 scalar。整模型重量化到 Q8_0/Q4_0 已通过 `--quant` 接入 CLI。
 - F32 Linear 已支持 SIMD 和输出通道级多线程，Matmul 与 CPU Attention 复用
   `ParallelFor()`；CLI 支持 `--threads`，当前调度逐调用创建/回收线程，
   详见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 - `MiniBatch` 仍逐 token 调用 `ForwardToken()`。
-- 已有 Backend/CUDA Runtime、设备 Tensor 和模型上传库接口；上传不切换 CPU
-  前向，CLI CUDA 推理仍拒绝，尚无 CUDA 算子、GPU Attention/KV Cache 或完整驻留 decode。
+- Backend/CUDA Runtime、四种格式的模型上传、设备算子、GPU Attention/KV Cache
+  与完整驻留前向已实现。CLI `generate/run/bench --backend cuda` 自动上传，
+  库前向以快照选择 GPU；仅最终 logits 下载给 CPU Sampler。详见
+  [设备驻留 CUDA Decode](device_resident_cuda_decode.md)。
 - token embedding 会展开为 F32。
 - tied LM Head 当前复制 embedding，而不是共享存储。
-- KV Cache 按完整 `max_seq_len` 一次性分配 F32。
+- CPU KV Cache 在构造时按完整窗口分配 F32，GPU Cache 首次设备前向按相同
+  容量分配；GPU 路径不镜像更新 CPU Cache，因此 CUDA Context 同时占用两端内存。
 - metadata getter 会多次重新扫描文件。
 
 ### Tokenizer 与模板
@@ -1391,7 +1395,7 @@ stats：交互会话累计消息、上下文和吞吐
 
 这些边界说明当前成果的定位是：
 
-> 一个结构清晰、可检查、可运行真实 Qwen2 GGUF 的教学型 CPU 推理实现，而不是成熟高性能推理引擎。
+> 一个结构清晰、可检查、可运行真实 Qwen2 GGUF 的教学型 CPU/CUDA 推理实现。
 
 ## 22. 隔一段时间后的建议复习顺序
 

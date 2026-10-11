@@ -1,14 +1,15 @@
 # CUDA KV Cache 与 Decode 注意力实现说明
 
-## 本阶段范围
+## 当前实现与阶段关系
 
 本阶段增加 GPU KV Cache 和 CUDA Decode 注意力，并在 `src/forward.cc`
 接入 F32 QKV 投影、RoPE、设备缓存写入与历史注意力读取。沿用用户提供的
 `cuda_kv_cache.h` 和 `cuda_attention.h` 接口。
 
-Norm、O 投影、FFN 和最终输出继续使用已有分发方式。当前实现仍在这些模块边界
-上传或下载激活，不代表完整设备驻留前向。量化或不完整 QKV 快照继续走原有混合
-回退路径；CLI 的 CUDA 后端装配属于后续模块。
+上述首次接入时使用混合路径。当前已继续接通 Norm、O 投影、FFN 和最终输出，
+支持 F32/Q8_0/Q4_0/Q4_1 完整设备前向；CLI generate/run/bench 已接入。
+不完整快照直接报错。阶段验证快照保留在末节，完整当前链路见
+[设备驻留 CUDA Decode](device_resident_cuda_decode.md)。
 
 ## 缓存布局与资源管理
 
@@ -19,7 +20,8 @@ Key 和 Value 分别由一个 `CudaDeviceBuffer` 独占管理，元素类型为 
 [n_layers, max_seq_len, n_kv_heads, head_dim]
 ```
 
-单 token 输入形状为 `[n_kv_heads, head_dim]`。槽位字节偏移为：
+主机单 token 输入形状为 `[n_kv_heads, head_dim]`；设备写入也接受同元素数的
+扁平 `[n_kv_heads * head_dim]`。槽位字节偏移为：
 
 ```text
 ((layer * max_seq_len) + pos) * n_kv_heads * head_dim * sizeof(float)
@@ -29,7 +31,7 @@ Key 和 Value 分别由一个 `CudaDeviceBuffer` 独占管理，元素类型为 
 各次乘法及双 Buffer 总容量溢出；先在临时对象完成分配和清零，再替换旧缓存。
 `bytes()` 返回两块显存的实际字节容量之和。
 
-`Clear()` 保留显存与配置，复用现有拷贝接口分块上传主机零值，以限制临时主机内存。
+`Clear()` 保留显存与配置，直接通过设备 memset 清零，不上传主机零值。
 该操作用于初始化或显式清理，不在逐 token 注意力热路径中执行。
 
 `Write()` 校验输入形状与存储元素数，执行主机到设备拷贝。
@@ -56,38 +58,42 @@ KV 头，查询头数必须能被 KV 头数整除。
 
 ## Context、前向与统计
 
-Context 同时保留 CPU 与 GPU Cache。构造 Context 不分配 GPU Cache；所有层
-F32 QKV 权重可用时，在首次进入设备注意力链路时分配。已有 CPU 前缀仅在该次
-初始化时迁移。
+Context 构造时分配 CPU Cache，不分配 GPU Cache；存在完整上传快照时，
+首次 CUDA Forward 从位置 0 分配设备 Cache，后续 token 复用显存与历史。
+不自动迁移已有 CPU 前缀，切换后端应新建 Context 并重放历史。
 
-逐 token 链路先上传现有 CPU Norm 输出，再执行设备 QKV、可选偏置和 RoPE，
+逐 token 链路从设备 Embedding/Norm 开始，执行设备 QKV、可选偏置和 RoPE，
 通过 `WriteDevice()` 写入当前槽位。CUDA 注意力直接读取历史 KV；注意力输出
-下载后衔接原有 O 投影和后续计算。
+保留在设备继续执行 O 投影和 FFN，仅最终 logits 下载供 CPU 采样。
 
 GPU 推理不镜像更新 CPU Cache。已有 GPU 历史的 Context 若失去匹配设备或完整
-F32 QKV 快照，前向会报错，避免回退后使用陈旧 CPU 历史；应为切换后的路径
+权重快照，前向会报错，避免回退后使用陈旧 CPU 历史；应为切换后的路径
 创建新的 Context。
 
-KV 写入统计在前向调用边界记录两个 token 槽位，首次前缀迁移也记录写入字节。
+KV 写入统计在每层前向调用边界记录两个 token 槽位。
 KV 读取统计按查询头累计逻辑 Key/Value 流量，GQA 共享头按各查询头分别计入。
-初始化清零和测试回读不计入前向运行统计；前缀迁移记录主机到设备拷贝，
-常规激活边界记录上传下载，避免重复统计。
+初始化清零和测试回读不计入前向运行统计。正常完整设备链路没有激活 H2D，
+每 token 仅一份 logits D2H；KV 逻辑读取不等于物理 DRAM 流量。
 
 ## 测试与验证
 
-`test_cuda_kv_cache.cc` 覆盖空状态、构造与 Reset、Clear、主机和设备写入、
+`cuda_kv_cache_test.cc` 覆盖空状态、构造与 Reset、Clear、主机和设备写入、
 逐槽逐头读取、完整行主序布局、非法索引与形状、设备边界、CPU 数据一致性，
-以及前向延迟初始化、历史迁移和统计。
+以及前向延迟初始化、历史驻留、CPU 前缀切换保护和统计。
+`cuda_forward_buffer_test.cc` 另外验证扁平/分头设备写入等价、缓存配置/历史边界。
 
 `cuda_attention_test.cc` 覆盖无 CUDA Stub、独立 CPU 数值参考、多层 GQA、
 因果端点、跨线程块宽度的头维度，以及形状、存储和设备校验。
 设备探测不可用时明确跳过；探测成功后的计算异常仍使测试失败。
 
-上一轮 CPU Release 构建成功，完整 CTest 为 163 项通过、40 项跳过、0 项失败；
-其中 Cache/Attention 专项为 2 项通过、6 项 GPU 用例跳过。本轮仅调整注释和文档，
-未重复执行构建与测试。
+本次 CPU/CUDA 全量回归与真实模型验证见
+[CLI 同步说明](cli_integration_status.md#回归验证)，已实际验证单 GPU Cache、
+Attention、完整前向与聊天历史复用。多 GPU 与 compute-sanitizer 尚未验证。
 
-CUDA 编译、GPU 数值、多设备行为和性能尚未验证，后续执行：
+历史首次接入阶段：CPU Release 全量为 163 项通过、40 项跳过、0 项失败；
+其中 Cache/Attention 专项为 2 项通过、6 项 GPU 用例跳过。
+
+当前可复现专项：
 
 ```bash
 cmake -S . -B build-cuda -DMINI_LLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release

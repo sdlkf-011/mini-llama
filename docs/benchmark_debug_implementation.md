@@ -150,6 +150,9 @@ n_decode_tokens    = max(N - 1, 0)
 | `-n, --n-predict <n>` | `16` | 指定生成预算；`0` 表示只测预填充 |
 | `--max-tokens <n>` | `16` | `--n-predict` 的旧版别名 |
 | `--threads <N>` | 自动 | 正数设置 CPU 线程数；`0` 恢复自动模式 |
+| `--backend cpu\|cuda` | `cpu` | 选择 CPU 或完整设备前向 |
+| `--device <id>` | `0` | CUDA 设备编号，仅与 CUDA 后端配合 |
+| `--quant q8_0\|q4_0` | 保留模型格式 | 重量化所有 Linear，输出相对模型原始格式的 logits 误差 |
 | `--seed <n>` | `0` | 设置采样器种子 |
 | `--verbose` | 关闭 | 输出 logits 和 KV Cache 调试信息 |
 
@@ -157,6 +160,12 @@ n_decode_tokens    = max(N - 1, 0)
 校验，但不接受 `--temperature`、`--top-k` 或 `--dump-logits`。当前基准运行器使用
 默认温度 `0.0`，因此实际采用贪心采样；固定 seed 已保留在接口和追踪中，但不会
 改变当前贪心结果。
+
+CUDA 模式自动上传权重，基准阶段执行完整设备前向和 CPU 采样，报告上传权重
+及运行统计。`bench --quant` 保留原模型，对同一 prompt 最后位置的 logits
+报告最大/平均绝对误差；两次误差对照前向不计入 prefill/decode 性能区间。
+原始格式可能已经量化，不等于全 F32 参考。运行摘要在误差计算前输出，
+只包含基准实际工作量。权重大小为数据字节，不包括 KV Cache 和临时激活。
 
 ### 运行性能基准
 
@@ -279,6 +288,7 @@ CPU 多线程阶段的历史完整回归为 113/113，`mini-llama-tests` 前缀�
 22/22。`python3 scripts/test_threaded_cli.py` 检查 1/4/自动线程配置、logits
 和生成结果一致性，以及本节示例中的输出标签；测试入口使用当前文件名
 `tests/threaded_matmul_test.cc`。完整说明见 CPU 多线程文档。
+该脚本已以 `threaded-cli-smoke` 接入全量 CTest。
 
 ## 当前边界
 
@@ -292,12 +302,14 @@ CPU 多线程阶段的历史完整回归为 113/113，`mini-llama-tests` 前缀�
   `RequestContext` 中。
 - `decode_ms` 覆盖逐 token 前向、采样以及 verbose 模式下的循环内输出，因此
   性能比较必须关闭 `--verbose`。
-- CLI 已有 `--backend cpu|cuda`、`--device` 与 `--threads`；CUDA 推理仍由
-  入口明确拒绝。F32 Linear 使用 SIMD/线程分发，Attention 按 head 并行；
+- CLI 已有 `--backend cpu|cuda`、`--device`、`--threads` 和 `--quant`；CUDA
+  benchmark 已连接完整设备前向。CPU F32 Linear 使用 SIMD/线程分发，Attention 按 head 并行；
   三种量化 Linear 支持 batch 与外层并行，Q8_0/Q4_0 可使用 NEON，Q4_1 点积
-  为 scalar。不能概括为全部算子都已 SIMD 化或已完成 GPU 基准。
+  为 scalar。不能概括为全部 CPU 算子都已 SIMD 化；GPU 链路与验证见
+  [设备驻留 Decode](device_resident_cuda_decode.md)。
 - `DumpKvCacheInfo()` 面向正常构造的四维 `KvCache`，不负责诊断损坏或未初始化的
-  cache shape。
+  cache shape。verbose 中展示的是保留的 CPU Cache 配置，不是 GPU 历史回读；
+  GPU Cache 实际读写由 CUDA 运行摘要记录。
 
 ## 相关文档
 

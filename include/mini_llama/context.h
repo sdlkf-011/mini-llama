@@ -13,7 +13,7 @@ namespace mini_llama {
 struct MiniLlamaContext {
   const MiniLlamaModel* model = nullptr;
   KvCache kv_cache;
-  // 仅在本阶段 CUDA QKV/Attention 链路首次执行时分配显存
+  // 完整 CUDA 前向首次执行时分配显存，后续 Token 保留历史
   CudaKvCache cuda_kv_cache;
   int pos = 0;
 

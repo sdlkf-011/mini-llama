@@ -15,9 +15,13 @@ using namespace mini_llama;
 class CudaAttentionGpuTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    if (!CudaRuntimeBuilt()) GTEST_SKIP() << "CUDA not built";
+    if (!CudaRuntimeBuilt()) {
+      GTEST_SKIP() << "CUDA not built";
+    }
     try {
-      if (CudaDeviceCount() == 0) GTEST_SKIP() << "No CUDA device";
+      if (CudaDeviceCount() == 0) {
+        GTEST_SKIP() << "No CUDA device";
+      }
       CudaGetDeviceInfo(0);
     } catch (const std::runtime_error& e) {
       GTEST_SKIP() << "CUDA device query unavailable: " << e.what();
@@ -29,7 +33,9 @@ class CudaAttentionGpuTest : public ::testing::Test {
 // 时主机/设备入口均明确抛出未构建异常。
 TEST(CudaAttentionTest, BuiltAndStub) {
   EXPECT_EQ(CudaAttentionBuilt(), CudaRuntimeBuilt());
-  if (CudaRuntimeBuilt()) GTEST_SKIP() << "CPU stub only";
+  if (CudaRuntimeBuilt()) {
+    GTEST_SKIP() << "CPU stub only";
+  }
   Tensor q({2, 4});
   CudaKvCache cache;
   CudaTensor device_q;
@@ -46,8 +52,10 @@ TEST_F(CudaAttentionGpuTest, HostAndDeviceGqaMatchIndependentReference) {
     CudaKvCache cache(2, 4, kv_heads, dim);
     KvCache cpu(2, 4, kv_heads, dim);
     Tensor q({heads, dim});
-    for (size_t i = 0; i < q.size(); ++i) q.data[i] = std::sin(0.17f * i);
-    for (int l = 0; l < 2; ++l)
+    for (size_t i = 0; i < q.size(); ++i) {
+      q.data[i] = std::sin(0.17f * i);
+    }
+    for (int l = 0; l < 2; ++l) {
       for (int t = 0; t < 4; ++t) {
         Tensor k({kv_heads, dim}), v(k.shape);
         for (size_t i = 0; i < k.size(); ++i) {
@@ -57,8 +65,9 @@ TEST_F(CudaAttentionGpuTest, HostAndDeviceGqaMatchIndependentReference) {
         cache.Write(l, t, k, v);
         cpu.Write(l, t, k, v);
       }
+    }
     auto dq = CudaTensorFromHost(q);
-    for (int layer = 0; layer < 2; ++layer)
+    for (int layer = 0; layer < 2; ++layer) {
       for (int pos : {0, 2, 3}) {
         // 使用独立的双精度分数与归一化计算，避免直接复用被测 CUDA 实现。
         Tensor expected(q.shape);
@@ -66,7 +75,9 @@ TEST_F(CudaAttentionGpuTest, HostAndDeviceGqaMatchIndependentReference) {
           std::vector<double> scores(pos + 1);
           for (int t = 0; t <= pos; ++t) {
             const float* k = cpu.KeyPtr(layer, t, h / 2);
-            for (int d = 0; d < dim; ++d) scores[t] += q.data[h * dim + d] * k[d];
+            for (int d = 0; d < dim; ++d) {
+              scores[t] += q.data[h * dim + d] * k[d];
+            }
             scores[t] /= std::sqrt(static_cast<double>(dim));
           }
           double maximum = *std::max_element(scores.begin(), scores.end()), sum = 0;
@@ -74,11 +85,12 @@ TEST_F(CudaAttentionGpuTest, HostAndDeviceGqaMatchIndependentReference) {
             score = std::exp(score - maximum);
             sum += score;
           }
-          for (int d = 0; d < dim; ++d)
+          for (int d = 0; d < dim; ++d) {
             for (int t = 0; t <= pos; ++t) {
               expected.data[h * dim + d] +=
                   scores[t] / sum * cpu.valuePtr(layer, t, h / 2)[d];
             }
+          }
         }
         auto host = CudaAttentionDecode(q, cache, layer, pos, heads, kv_heads, dim);
         auto device = CudaAttentionDecodeDeviceInput(dq, cache, layer, pos, heads,
@@ -91,6 +103,7 @@ TEST_F(CudaAttentionGpuTest, HostAndDeviceGqaMatchIndependentReference) {
           EXPECT_NEAR(device.data[i], expected.data[i], 1e-4f);
         }
       }
+    }
   }
 }
 

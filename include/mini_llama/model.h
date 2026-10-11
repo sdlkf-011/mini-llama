@@ -60,8 +60,8 @@ struct CudaUploadedWeight {
 };
 
 // 模型的 CUDA 权重快照与统计信息。上传统计独立记录，运行统计由推理调用方累计
-// 无快照或未命中的 CPU Linear 不更新计数；命中 F32 权重时记录 CUDA 调用与拷贝
-// F32 QKV 设备链路记录 Attention/KV 流量；混合路径的 CPU fallback 单独计数
+// 完整设备前向按算子调用统计；主机接口按实际边界记录 H2D/D2H
+// KV read 统计各查询头访问历史 K/V 的逻辑字节数，不代表物理 DRAM 流量
 struct CudaModelWeights {
   int device_id = 0;                 // 权重所在的 CUDA 设备编号
   size_t uploaded_weight_count = 0;  // 已上传的权重数量，包含稠密与线性权重
@@ -88,7 +88,7 @@ struct MiniLlamaModel {
   std::vector<LayerWeights> layers;  // [n_layers]，各 Transformer 层权重
   Tensor final_norm;                 // [dim] F32，最终 RMSNorm 缩放权重
   QuantizedTensor lm_head;           // [vocab_size, dim]，词表输出投影权重
-  // 模型副本共享快照；ForwardToken 可借用命中的 F32 权重，修改 CPU 权重后需重新上传
+  // 模型副本共享快照；ForwardToken 借用常驻设备权重，修改 CPU 权重后需重新上传
   std::shared_ptr<CudaModelWeights> cuda_weights;
 };
 
@@ -98,15 +98,15 @@ size_t ModelWeightBytes(const MiniLlamaModel& model);
 // 返回相同模型权重全部以 F32 存储时需要的数据字节数
 size_t ModelWeightBytesF32(const MiniLlamaModel& model);
 
-// 当前支持 F32/Q8_0 Linear 权重；Embedding、Norm 和可选 Bias 上传为 F32
+// 支持 F32/Q8_0/Q4_0/Q4_1 Linear；Embedding、Norm 和可选 Bias 上传为 F32
 // 保留 CPU 权重；全部上传成功后替换快照，失败保留原设备权重
-// 此接口准备权重快照；当前 ForwardToken 对命中快照的 F32 Linear 使用 CUDA
+// 快照存在时 ForwardToken 使用完整设备路径，缺失权重明确报错
 void UploadModelWeightsToCuda(MiniLlamaModel& model, int device_id = 0);
 
 // 解除当前模型的快照引用；其他模型副本持有同一快照时，显存继续保留
 void ClearModelCudaWeights(MiniLlamaModel& model);
 
-// 仅判断快照引用非空，不代表权重完整、设备可用或完整设备前向已接入
+// 仅判断快照引用非空；完整性由 ForwardToken 校验，设备可用性由 Runtime 校验
 bool ModelHasCudaWeights(const MiniLlamaModel& model);
 
 // 读取全部已上传权重数量，包含 embedding/norm/bias；无快照时返回零
@@ -119,11 +119,10 @@ size_t ModelCudaUploadedF32WeightCount(const MiniLlamaModel& model);
 // 读取 Q8_0 Linear 数量
 size_t ModelCudaUploadedQ80WeightCount(const MiniLlamaModel& model);
 
-// 当前上传入口不支持 Q4_0/Q4_1，正常上传后的这两项为 0
-// 读取 Q4_0 Linear 数量，当前正常上传结果为零
+// 读取 Q4_0 Linear 数量
 size_t ModelCudaUploadedQ40WeightCount(const MiniLlamaModel& model);
 
-// 读取 Q4_1 Linear 数量，当前正常上传结果为零
+// 读取 Q4_1 Linear 数量
 size_t ModelCudaUploadedQ41WeightCount(const MiniLlamaModel& model);
 
 // 读取上传权重数据占用的显存字节数，不包含 CPU 副本、激活或 KV Cache
@@ -135,7 +134,7 @@ void ResetModelCudaRuntimeStats(MiniLlamaModel& model);
 // 读取已记录的 CUDA Linear 调用次数；以下运行统计接口无快照时均返回零
 size_t ModelCudaLinearCalls(const MiniLlamaModel& model);
 
-// 读取 CUDA 激活与辅助算子计数；独立 cuda_ops 尚未接入前向，当前前向不更新此字段
+// 读取 Norm、RoPE、SiLU、Mul 和 Add（含 Bias）的接口调用数，不包含 Embedding
 size_t ModelCudaActivationCalls(const MiniLlamaModel& model);
 
 // 读取设备 Attention 累计调用次数
@@ -144,10 +143,10 @@ size_t ModelCudaAttentionCalls(const MiniLlamaModel& model);
 // 读取设备推理中的 CPU Attention 回退次数，普通 CPU 前向不计作回退
 size_t ModelCudaAttentionCpuFallbacks(const MiniLlamaModel& model);
 
-// 读取设备 KV Cache 写入计数；当前前向只有 CPU KV Cache，不更新此字段
+// 读取设备 KV Cache 写入字节数
 size_t ModelCudaKvCacheWriteBytes(const MiniLlamaModel& model);
 
-// 读取设备 KV Cache 读取计数；当前前向只有 CPU KV Cache，不更新此字段
+// 读取设备 KV Cache 逻辑读取字节数，GQA 共享数据按各查询头计入
 size_t ModelCudaKvCacheReadBytes(const MiniLlamaModel& model);
 
 // 读取推理阶段主机到设备的拷贝次数，不计权重上传

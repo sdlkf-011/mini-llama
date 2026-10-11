@@ -44,7 +44,9 @@ void ValidateStorage(const Tensor& tensor, const char* caller) {
 
 // bias 为 nullptr 表示不加偏置；非空时在 GPU 分配和计算前检查形状与存储
 void ValidateBias(const Tensor* bias, int out_features) {
-  if (bias == nullptr) return;
+  if (bias == nullptr) {
+    return;
+  }
   bias->AssertShape({out_features}, "CudaLinear bias");
   ValidateStorage(*bias, "CudaLinear bias");
 }

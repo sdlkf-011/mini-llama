@@ -176,16 +176,14 @@ TEST_F(ThreadedMatmulTest, QuantizedLinearRejectsInvalidBatches) {
   const auto q40 = mini_llama::QuantizeToQ40(weight);
   const std::vector<mini_llama::BlockQ41> q41(q40.size());
   const auto check = [&](const auto& blocks, auto linear) {
-    EXPECT_THROW(linear(Tensor({3, 32}), blocks, weight.shape),
-                 std::runtime_error);
+    EXPECT_THROW(linear(Tensor({3, 32}), blocks, weight.shape), std::runtime_error);
     EXPECT_THROW(linear(Tensor({1, 2, 33}), blocks, weight.shape),
                  std::runtime_error);
     Tensor invalid_input({1, 33});
     for (int rows : {0, -1, std::numeric_limits<int>::max()}) {
       // 只修改 shape 元数据，避免为非法 batch 分配巨大输入数组。
       invalid_input.shape[0] = rows;
-      EXPECT_THROW(linear(invalid_input, blocks, weight.shape),
-                   std::runtime_error);
+      EXPECT_THROW(linear(invalid_input, blocks, weight.shape), std::runtime_error);
     }
     auto missing_blocks = blocks;
     missing_blocks.pop_back();
@@ -200,8 +198,8 @@ TEST_F(ThreadedMatmulTest, QuantizedLinearRejectsInvalidBatches) {
 // 验证 Q4_0 在加 8 编码前对有符号值舍入，正负半整数均向远离零的方向取整。
 // 使用 scale=1 检查半整数两侧、低/高 nibble 及解码结果，固定现有舍入规则。
 TEST_F(ThreadedMatmulTest, Q40RoundsSignedValuesBeforePacking) {
-  const std::vector<float> values =
-      {0.49f, 0.5f, 0.51f, -0.49f, -0.5f, -0.51f, 1.5f, -1.5f};
+  const std::vector<float> values = {0.49f, 0.5f,   0.51f, -0.49f,
+                                     -0.5f, -0.51f, 1.5f,  -1.5f};
   const std::vector<int> expected = {0, 1, 1, 0, -1, -1, 2, -2};
   Tensor weight({mini_llama::kQ40BlockSize}, 0.0f);
   weight.data[0] = 7.0f;

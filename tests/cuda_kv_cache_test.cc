@@ -1,3 +1,5 @@
+#include "mini_llama/cuda_kv_cache.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -6,7 +8,6 @@
 #include <stdexcept>
 
 #include "mini_llama/context.h"
-#include "mini_llama/cuda_kv_cache.h"
 #include "mini_llama/forward.h"
 
 namespace {
@@ -165,11 +166,12 @@ TEST_F(CudaKvCacheGpuTest, LayoutHostDeviceReadAndClearMatchCpu) {
   RequireCloseTensor(all_keys, cpu.keys);
   RequireCloseTensor(all_values, cpu.values);
   cache.Clear();
-  for (int l = 0; l < 2; ++l)
+  for (int l = 0; l < 2; ++l) {
     for (int p = 0; p < 3; ++p) {
       EXPECT_EQ(cache.ReadKey(l, p).data, std::vector<float>(8, 0));
       EXPECT_EQ(cache.ReadValue(l, p).data, std::vector<float>(8, 0));
     }
+  }
   cache.Reset(1, 2, 1, 6);
   EXPECT_EQ(cache.ReadValue(0, 1).shape, (std::vector<int>{1, 6}));
   cache.Reset();
@@ -193,8 +195,8 @@ TEST_F(CudaKvCacheGpuTest, RejectsIndicesShapesStorageAndDevices) {
   wrong.data.pop_back();
   EXPECT_THROW(cache.Write(0, 0, valid, wrong), std::runtime_error);
   auto dk = CudaTensorFromHost(valid);
-  CudaTensor flat({8});
-  EXPECT_THROW(cache.WriteDevice(0, 0, dk, flat), std::runtime_error);
+  CudaTensor wrong_device_shape({4, 2});
+  EXPECT_THROW(cache.WriteDevice(0, 0, dk, wrong_device_shape), std::runtime_error);
   EXPECT_THROW(cache.Reset(1, 1, 1, 1, CudaDeviceCount()), std::runtime_error);
   EXPECT_EQ(cache.n_layers(), 2);
   RequireCloseTensor(cache.ReadKey(0, 0), Tensor({2, 4}, 0));
@@ -230,8 +232,8 @@ TEST_F(CudaKvCacheGpuTest, ForwardLazyInitializationAndResidentHistory) {
       }
       EXPECT_EQ(ModelCudaAttentionCalls(gpu), 2u);
       EXPECT_EQ(ModelCudaAttentionCpuFallbacks(gpu), 0u);
-      EXPECT_EQ(ModelCudaHostToDeviceCopies(gpu), 11u);
-      EXPECT_EQ(ModelCudaDeviceToHostCopies(gpu), 11u);
+      EXPECT_EQ(ModelCudaHostToDeviceCopies(gpu), 0u);
+      EXPECT_EQ(ModelCudaDeviceToHostCopies(gpu), 1u);
       EXPECT_EQ(gpu.cuda_weights->kv_cache_write_bytes, 2u * 2 * 8 * sizeof(float));
       EXPECT_EQ(gpu.cuda_weights->kv_cache_read_bytes,
                 2u * 2 * (pos + 1) * 16 * sizeof(float));
@@ -241,24 +243,19 @@ TEST_F(CudaKvCacheGpuTest, ForwardLazyInitializationAndResidentHistory) {
   }
 }
 
-// 测试目的：先运行 CPU 前缀再上传权重，验证历史只迁移一次且后续 Decode
-// 数值和拷贝计数正确。
-TEST_F(CudaKvCacheGpuTest, CpuPrefixMigratesOnlyAtInitialization) {
-  auto cpu = MakeModel();
-  auto gpu = cpu;
-  MiniLlamaContext reference(&cpu), context(&gpu);
-  RequireCloseTensor(ForwardToken(context, gpu, 0), ForwardToken(reference, cpu, 0));
-  UploadModelWeightsToCuda(gpu);
-  context.pos = reference.pos = 1;
-  ResetModelCudaRuntimeStats(gpu);
-  RequireCloseTensor(ForwardToken(context, gpu, 2), ForwardToken(reference, cpu, 2),
-                     1e-4f);
-  EXPECT_EQ(ModelCudaHostToDeviceCopies(gpu), 15u);
-  context.pos = reference.pos = 2;
-  ResetModelCudaRuntimeStats(gpu);
-  RequireCloseTensor(ForwardToken(context, gpu, 4), ForwardToken(reference, cpu, 4),
-                     1e-4f);
-  EXPECT_EQ(ModelCudaHostToDeviceCopies(gpu), 11u);
+// 切换后端不能将缺失的 GPU 历史当作有效缓存；新上下文从零开始。
+TEST_F(CudaKvCacheGpuTest, CpuPrefixRequiresNewCudaContext) {
+  auto model = MakeModel();
+  MiniLlamaContext ctx(&model);
+  ForwardToken(ctx, model, 0);
+  UploadModelWeightsToCuda(model);
+  ctx.pos = 1;
+  EXPECT_THROW(ForwardToken(ctx, model, 2), std::runtime_error);
+  EXPECT_TRUE(ctx.cuda_kv_cache.empty());
+  EXPECT_EQ(ModelCudaHostToDeviceCopies(model), 0u);
+  MiniLlamaContext fresh(&model);
+  EXPECT_NO_THROW(ForwardToken(fresh, model, 0));
+  EXPECT_EQ(ModelCudaHostToDeviceCopies(model), 0u);
 }
 
 }  // namespace

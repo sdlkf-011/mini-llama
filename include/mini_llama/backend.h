@@ -22,7 +22,7 @@ bool ParseBackendKind(const std::string& text, BackendKind& kind);
 // 返回后端名称 cpu/cuda；未知枚举值返回 unknown
 std::string BackendKindName(BackendKind kind);
 
-// 判断是否启用 CUDA 构建；不代表 CLI CUDA 推理已经接入
+// 判断是否启用 CUDA 构建；不代表目标 GPU 可用或权重上传一定成功
 bool CudaBackendBuilt();
 
 // 判断指定 CUDA 设备是否可用，默认检查设备 0
@@ -34,7 +34,7 @@ std::string CudaDeviceSummary(int device_id = 0);
 // 校验后端配置和运行环境；CPU 禁止显式指定设备，无法运行时抛出异常
 void ValidateBackend(const BackendConfig& config);
 
-// 说明 CLI 计算路径；CUDA 推理未接入时返回不可用说明，未知后端抛出异常
+// 说明 CLI 的 CPU 或设备常驻 CUDA 计算路径，未知后端抛出异常
 // 此接口不校验环境，运行前应单独调用 ValidateBackend
 std::string BackendExecutionNote(const BackendConfig& config);
 
