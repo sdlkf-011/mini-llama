@@ -1,3 +1,4 @@
+// 测试目的：验证设备权重快照、F32/Q8/Q4 投影与 CPU 一致，并检查上传和所有权。
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -5,13 +6,13 @@
 #include <iostream>
 #include <stdexcept>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/batch.h"
 #include "mini_llama/context.h"
 #include "mini_llama/cuda_runtime.h"
 #include "mini_llama/forward.h"
 #include "mini_llama/model.h"
 #include "mini_llama/quant.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;
@@ -226,12 +227,15 @@ void VerifyQuantizedForward(QuantType type) {
 using cuda_forward_quant = CudaGpuTest;
 using cuda_forward_q4 = CudaGpuTest;
 
+// 测试目的：验证 Q8_0 前向投影保持权重驻留并与 CPU 数值一致。
 TEST_F(cuda_forward_quant, Q80ProjectionsRemainResident) {
   VerifyQuantizedForward(QuantType::kQ80);
 }
+// 测试目的：验证 Q4_0 前向投影保持权重驻留并覆盖尾块数值。
 TEST_F(cuda_forward_q4, Q40ProjectionsRemainResident) {
   VerifyQuantizedForward(QuantType::kQ40);
 }
+// 测试目的：验证 Q4_1 前向投影保持权重驻留并覆盖带偏移量化块。
 TEST_F(cuda_forward_q4, Q41ProjectionsRemainResident) {
   VerifyQuantizedForward(QuantType::kQ41);
 }

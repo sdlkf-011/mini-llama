@@ -1,5 +1,6 @@
-#ifndef MINI_LLAMA_TESTS_CUDA_FORWARD_TEST_UTILS_H_
-#define MINI_LLAMA_TESTS_CUDA_FORWARD_TEST_UTILS_H_
+// 测试目的：统一 CUDA 测试辅助命名空间，提供数值比较、确定性模型和 GPU 可用性检查。
+#ifndef MINI_LLAMA_TESTS_NAMES_TEST_H_
+#define MINI_LLAMA_TESTS_NAMES_TEST_H_
 
 #include <gtest/gtest.h>
 
@@ -7,6 +8,8 @@
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "mini_llama/cuda_runtime.h"
 #include "mini_llama/model.h"
@@ -148,4 +151,4 @@ inline void RequireDeviceStats(const MiniLlamaModel& model, size_t tokens) {
 }
 
 }  // namespace mini_llama::test
-#endif  // MINI_LLAMA_TESTS_CUDA_FORWARD_TEST_UTILS_H_
+#endif  // MINI_LLAMA_TESTS_NAMES_TEST_H_

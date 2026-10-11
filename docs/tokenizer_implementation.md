@@ -18,5 +18,5 @@ JSON 解析覆盖字符串转义、Unicode 代理对、整数、布尔值与未�
 构建系统已将全部 tokenizer 源文件加入 `mini_llama_core`，并提供独立的 `mini-llama-tokenizer-tests`
 测试目标。测试覆盖正常编解码、特殊 token、未知 token、非法输入及工厂函数；阶段记录的 tokenizer 测试 8 项、项目测试 61
 项通过为历史快照。当前
-`tests/unit/tokenizer_test.cc` 有 10 项用例，GGUF tokenizer 与模板另有单元和
+`tests/tokenizer_test.cc` 有 10 项用例，GGUF tokenizer 与模板另有单元和
 集成 target；运行状态需以当前构建验证为准。

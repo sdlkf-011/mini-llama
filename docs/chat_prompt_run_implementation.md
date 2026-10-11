@@ -34,8 +34,8 @@ ChatMessage[] ──PromptBuilder──→ prompt string
 | `include/mini_llama/prompt_builder.h` | 保留 `SetChatTemplate()`、`Build()` 接口 |
 | `src/prompt_builder.cc` | Plain、内置 Qwen2 和轻量 Jinja2 模板执行 |
 | `src/main.cc` | 从 GGUF 装配 chat template，并将其注入 `PromptBuilder` |
-| `tests/unit/chat_test.cc` | PromptBuilder、会话和 `run` 模式单元测试 |
-| `tests/unit/gguf_tokenizer_test.cc` | GGUF chat template metadata 边界测试 |
+| `tests/chat_test.cc` | PromptBuilder、会话和 `run` 模式单元测试 |
+| `tests/gguf_tokenizer_test.cc` | GGUF chat template metadata 边界测试 |
 | `tests/chat_test.cc` | GGUF → template → PromptBuilder 集成测试 |
 | `tests/CMakeLists.txt` | 注册单元测试与 `mini-llama-tests` 集成测试 |
 
@@ -253,7 +253,7 @@ Tokenizer 只处理字符串与 token ID 的转换。
 
 ### 单元测试
 
-`tests/unit/chat_test.cc` 使用完整字符串断言覆盖：
+`tests/chat_test.cc` 使用完整字符串断言覆盖：
 
 - 空历史、空 content、多轮对话与未知角色。
 - Qwen2 默认 system 注入、已有 system 保留、后置 system 边界。
@@ -263,7 +263,7 @@ Tokenizer 只处理字符串与 token ID 的转换。
 - trim marker、非法下标、空数组和未闭合模板。
 - `run` 命令、流式刷新和上下文长度拒绝。
 
-`tests/unit/gguf_tokenizer_test.cc` 覆盖：
+`tests/gguf_tokenizer_test.cc` 覆盖：
 
 - 显式 `tokenizer.chat_template` 优先于 architecture fallback。
 - 显式空模板保持为空。

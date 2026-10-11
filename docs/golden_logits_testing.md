@@ -21,7 +21,7 @@ python3 scripts/test_golden.py
 MINI_LLAMA_BIN=/path/to/mini-llama python3 scripts/test_golden.py
 ```
 
-自动测试按 C++ `--dump-logits` → `make_golden.py` → `compare_logits.py`
+自动测试按 C++ `--dump-logits` → `make_golden.py` → `compare_logs.py`
 执行，在临时目录导出并比较以下文件，结束时清理临时目录：
 
 - C++：`logits_stepN.bin`、`generation_tokens.txt`。
@@ -63,7 +63,7 @@ build/mini-llama generate --model models/tiny --prompt hello --n-predict 4 \
 python3 scripts/make_golden.py --model models/tiny --prompt hello \
   --n-predict 4 \
   --output-dir /tmp/mini-llama-python-golden
-python3 scripts/compare_logits.py --cpp-dir /tmp/mini-llama-cpp-golden \
+python3 scripts/compare_logs.py --cpp-dir /tmp/mini-llama-cpp-golden \
   --python-dir /tmp/mini-llama-python-golden
 ```
 

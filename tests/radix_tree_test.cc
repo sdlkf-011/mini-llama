@@ -1,3 +1,4 @@
+// 测试目的：验证前缀树最长匹配、重复插入、清空和移动后的序列计数。
 #include "mini_llama/radix_tree.h"
 
 #include <gtest/gtest.h>

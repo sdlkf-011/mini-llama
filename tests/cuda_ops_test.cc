@@ -1,3 +1,4 @@
+// 测试目的：验证 CUDA 主机和设备算子数值、输入校验及 CPU stub 契约。
 #include "mini_llama/cuda_ops.h"
 
 #include <gtest/gtest.h>
@@ -6,8 +7,8 @@
 #include <stdexcept>
 #include <string>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/ops.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;

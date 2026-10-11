@@ -1,7 +1,8 @@
+// 测试目的：验证设备前向缓冲区布局、KV 历史校验及缓存分配复用。
 #include <gtest/gtest.h>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/forward.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;

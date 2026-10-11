@@ -1,3 +1,4 @@
+// 测试目的：验证 CPU 基础算子、矩阵分发、RoPE/GQA 数值与输入边界。
 #include "mini_llama/ops.h"
 
 #include <gtest/gtest.h>

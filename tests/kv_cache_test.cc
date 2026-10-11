@@ -1,3 +1,4 @@
+// 测试目的：验证 CPU KV 缓存的层/位置/头寻址以及形状和越界检查。
 #include "mini_llama/kv_cache.h"
 
 #include <gtest/gtest.h>

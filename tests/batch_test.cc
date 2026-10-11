@@ -1,3 +1,4 @@
+// 测试目的：验证 token 批次、位置编号及空输入行为。
 #include "mini_llama/batch.h"
 
 #include <gtest/gtest.h>

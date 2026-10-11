@@ -1,3 +1,4 @@
+// 测试目的：验证 CPU Q8_0/Q4_0/Q4_1 量化、反量化及 Linear 的数值误差。
 #include "mini_llama/quant.h"
 
 #include <gtest/gtest.h>

@@ -1,3 +1,5 @@
+// 测试目的：对照独立 CPU 参考结果验证 CUDA GQA Attention，并检查非法输入和 CPU
+// stub。
 #include "mini_llama/cuda_attention.h"
 
 #include <gtest/gtest.h>
@@ -6,8 +8,8 @@
 #include <cmath>
 #include <stdexcept>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/kv_cache.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;

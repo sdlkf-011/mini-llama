@@ -88,7 +88,7 @@ Top-k 采样先按 logit 从高到低排序，只保留前 `k` 个候选，再�
 
 ## 单元测试
 
-新增 `tests/unit/sampler_test.cc`，每个测试前均有注释说明测试目的，覆盖：
+新增 `tests/sampler_test.cc`，每个测试前均有注释说明测试目的，覆盖：
 
 - 贪心采样选择最大 logit，并验证并列最大值的 `ArgMax` 行为。
 - 相同 seed 在温度采样下产生相同的 token 序列。

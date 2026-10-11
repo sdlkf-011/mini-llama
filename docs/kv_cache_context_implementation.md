@@ -104,12 +104,12 @@ Q 和 K 应用位置旋转，V 不参与旋转。实现检查输入为二维张�
 
 本阶段新增以下测试文件，每个测试前均注释了测试目的：
 
-- `tests/unit/kv_cache_test.cc`：写入/读取寻址，以及形状和越界校验。
+- `tests/kv_cache_test.cc`：写入/读取寻址，以及形状和越界校验。
 - `tests/radix_tree_test.cc`：共享前缀、最长匹配、重复插入、清空和移动语义。
-- `tests/unit/chat_test.cc`：覆盖 PromptBuilder、终端和 Run 编排；`MiniLlamaContext`
+- `tests/chat_test.cc`：覆盖 PromptBuilder、终端和 Run 编排；`MiniLlamaContext`
   的生命周期与 token 历史另在前向和 batch 测试中检查。
 - `tests/request_context_test.cc`：请求启动、事件记录、耗时、摘要格式化、错误状态和事件顺序。
-- `tests/unit/forward_test.cc`：单 token 前向结果、KV Cache 写入、批量与逐 token 等价性、上下文状态维护和非法输入校验。
+- `tests/forward_test.cc`：单 token 前向结果、KV Cache 写入、批量与逐 token 等价性、上下文状态维护和非法输入校验。
 
 构建和测试命令：
 

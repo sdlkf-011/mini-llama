@@ -24,7 +24,7 @@ Q8_0/Q4_0/Q4_1 Linear；它们尚未接入模型前向。设备 Attention、CUDA
 - `src/forward.cc`：按权重名称和类型查找快照，各层七种投影与 LM Head 分流。
 - `CMakeLists.txt`、`tests/CMakeLists.txt`：cuBLAS 链接与测试注册。
 - `tests/cuda_matmul_test.cc`、`tests/cuda_forward_linear_test.cc`：算子与集成测试。
-- `tests/unit/forward_test.cc`：保留上传前后的数值对照，按 F32 分流核对运行统计。
+- `tests/forward_test.cc`：保留上传前后的数值对照，按 F32 分流核对运行统计。
 
 保留用户回退后的 Model、Context 定义，不修改两者或添加后端开关成员，
 `include/mini_llama/forward.h`、`src/batch.cc` 保持原始三参数调用，不引入新接口

@@ -283,7 +283,7 @@ ctest --test-dir build --output-on-failure
 | --- | --- |
 | `src/main.cc` | 位置模型参数、RequestContext 接入、阶段计时和 CLI 帮助 |
 | `src/terminal.cc` | `/stats` 增加消息数和上下文 token 数 |
-| `tests/unit/chat_test.cc` | stats、位置模型参数和错误 trace 回归测试 |
+| `tests/chat_test.cc` | stats、位置模型参数和错误 trace 回归测试 |
 | `docs/qwen2_gguf_end_to_end_smoke_test.md` | 本阶段实现与实测总结 |
 
 没有修改 GGUF Reader、GGUF Loader、`GgufTokenizer`、`PromptBuilder`、Forward、

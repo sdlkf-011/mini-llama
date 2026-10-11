@@ -1,3 +1,4 @@
+// 测试目的：验证设备 KV 缓存的布局、读写、清空、输入检查及前向历史约束。
 #include "mini_llama/cuda_kv_cache.h"
 
 #include <gtest/gtest.h>
@@ -7,9 +8,9 @@
 #include <cmath>
 #include <stdexcept>
 
-#include "cuda_forward_test_utils.h"
 #include "mini_llama/context.h"
 #include "mini_llama/forward.h"
+#include "names_test.h"
 
 namespace {
 using namespace mini_llama;

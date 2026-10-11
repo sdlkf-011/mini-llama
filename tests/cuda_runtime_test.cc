@@ -1,3 +1,4 @@
+// 测试目的：验证 CUDA 运行时探测、设备信息、显存拷贝、缓冲区所有权与 CLI 行为。
 #include "mini_llama/cuda_runtime.h"
 
 #include <gtest/gtest.h>
@@ -9,12 +10,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "main_test.h"
 #include "mini_llama/backend.h"
-
-namespace mini_llama {
-int RunMain(int argc, const char* const argv[], std::istream& input,
-            std::ostream& output, std::ostream& error);
-}  // namespace mini_llama
 
 namespace {
 
