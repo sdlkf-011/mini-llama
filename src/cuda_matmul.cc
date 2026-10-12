@@ -7,6 +7,9 @@
 #ifdef MINI_LLAMA_USE_CUDA
 #include <cublas_v2.h>
 #include <cuda_runtime_api.h>
+
+#include <map>
+#include <memory>
 #endif
 
 namespace mini_llama {

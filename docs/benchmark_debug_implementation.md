@@ -77,8 +77,10 @@ decode_tokens_per_sec
 | `DumpKvCacheInfo(cache, current_pos)` | 输出层数、最大序列长度、KV 头数、头维度及键值张量 shape |
 
 `DumpLogitsTopK()` 的输入不是一维张量时只输出错误提示。`k <= 0` 或 `k` 大于
-词表大小时会输出整个词表。详细浮点输出使用固定六位小数，五参数接口和直接 DumpLogitsTopK 会改变
-std::cout 的浮点格式；已有输出流重载通过局部适配恢复 std::cout 的缓冲区与格式。
+词表大小时会输出整个词表。详细浮点输出使用固定六位小数，输出后恢复目标流
+原有的格式和精度。三个调试函数也提供显式接收 `std::ostream&` 的重载；
+benchmark 将目标流直接传递给这些函数，不切换全局 `std::cout.rdbuf()`。
+使用独立输出流的并发调用不会互相重定向，`verbose=false` 时不会访问目标流。
 
 ### RunBenchmark
 
@@ -270,7 +272,12 @@ CLI 异常处理，输出 `status=error` 的请求摘要。
 
 ## 测试覆盖
 
-阶段完成时 `tests/debug_test.cc` 包含 8 项单元测试（当前为 13 项）：
+阶段完成时 `tests/debug_test.cc` 包含 8 项单元测试，当前还覆盖：
+
+- 输出期间不修改全局 `std::cout`，并保留目标流的格式和精度。
+- 多个 benchmark 在独立输出流上并行运行，详细和静默输出互不干扰。
+
+原有覆盖包括：
 
 - 两种吞吐量公式及零耗时保护。
 - 张量 shape 元数据输出。

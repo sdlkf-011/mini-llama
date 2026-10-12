@@ -55,12 +55,25 @@ C++ 标准为 C++17，CMakeLists.txt 声明最低 CMake 版本为 3.17。
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |
 | `MINI_LLAMA_CUDA` | `OFF` | 编译 CUDA 包装、kernel 并链接 CUDA Runtime/cuBLAS |
+| `MINI_LLAMA_LIBEDIT` | `AUTO` | 自动检测可选的 libedit 行编辑器；`ON` 要求可用，`OFF` 禁用 |
 | `BUILD_TESTING` | `ON` | 构建 GoogleTest 测试并注册 CTest/Python 回归 |
 | `CMAKE_CUDA_ARCHITECTURES` | 由构建环境决定 | 指定目标 GPU 架构，使用此选项需 CMake 3.18 或更新版本 |
 
 启用测试需要 GoogleTest 和 Python 3。CMake 优先查找本机 GoogleTest，找不到时
 通过 FetchContent 获取 v1.15.2。NumPy 用于 golden logits 回归，缺少时该项明确跳过。
 只构建推理程序可添加 `-DBUILD_TESTING=OFF`。
+
+libedit 是 Linux/macOS 交互聊天的可选依赖，用于 UTF-8 中文退格、光标移动和
+跨行重绘。默认 `AUTO` 在找到开发文件时启用；缺少时给出配置警告，仍可正常
+构建，交互输入回退到 `std::getline`，中文退格的显示问题仍可能出现。
+Ubuntu/Debian 可运行 `sudo apt-get install libedit-dev` 安装开发文件。
+`-DMINI_LLAMA_LIBEDIT=ON` 要求 libedit 可用，缺少依赖或平台不支持时配置失败；
+`-DMINI_LLAMA_LIBEDIT=OFF` 完全禁用其查找和链接。
+
+管道、重定向输入及注入的流始终使用 `std::getline`。启用行编辑器时终端需设置
+有效的 `TERM` 和 UTF-8 locale（如 `LANG=C.UTF-8`）；读取时只调整当前线程的
+字符 locale，环境不是 UTF-8 时尝试使用 `C.UTF-8` 或 `en_US.UTF-8`。
+`terminal-input` 伪终端回归只在启用 libedit 的构建中注册。
 
 ### CPU
 

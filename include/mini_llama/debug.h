@@ -42,6 +42,12 @@ void DumpTensorShape(const Tensor& tensor, const std::string& name);
 void DumpLogitsTopK(const Tensor& logits, int k);
 void DumpKvCacheInfo(const KvCache& cache, int current_pos = -1);
 
+// 显式传递输出流，避免重定向共享的标准输出
+void DumpTensorShape(const Tensor& tensor, const std::string& name,
+                     std::ostream& output);
+void DumpLogitsTopK(const Tensor& logits, int k, std::ostream& output);
+void DumpKvCacheInfo(const KvCache& cache, int current_pos, std::ostream& output);
+
 // 执行预填充和解码，并返回相应的耗时统计
 // verbose 为 true 时，在各阶段输出详细调试信息
 BenchmarkResult RunBenchmark(const MiniLlamaModel& model,

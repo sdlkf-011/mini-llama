@@ -14,27 +14,64 @@
 
 namespace mini_llama {
 
+namespace {
+class OutputFormat {
+ public:
+  explicit OutputFormat(std::ostream& output)
+      : output_(output), flags_(output.flags()), precision_(output.precision()) {}
+  ~OutputFormat() {
+    output_.flags(flags_);
+    output_.precision(precision_);
+  }
+
+ private:
+  std::ostream& output_;
+  std::ios::fmtflags flags_;
+  std::streamsize precision_;
+};
+}  // namespace
+
+void DumpTensorShape(const Tensor& t, const std::string& name) {
+  DumpTensorShape(t, name, std::cout);
+}
+
+void DumpLogitsTopK(const Tensor& logits, int k) {
+  DumpLogitsTopK(logits, k, std::cout);
+}
+
+void DumpKvCacheInfo(const KvCache& cache, int current_pos) {
+  DumpKvCacheInfo(cache, current_pos, std::cout);
+}
+
+BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
+                             const std::vector<int>& prompt_tokens, int n_predict,
+                             unsigned int seed, bool verbose) {
+  return RunBenchmark(model, prompt_tokens, n_predict, seed, verbose, std::cout);
+}
+
 // --------------------------------------
 // 输出张量名称、形状、数据类型和元素数量
 // --------------------------------------
-void DumpTensorShape(const Tensor& t, const std::string& name) {
-  std::cout << "  tensor: " << name;
-  std::cout << " shape=[";
+void DumpTensorShape(const Tensor& t, const std::string& name,
+                     std::ostream& output) {
+  output << "  tensor: " << name;
+  output << " shape=[";
   for (size_t i = 0; i < t.shape.size(); ++i) {
     if (i > 0) {
-      std::cout << ", ";
+      output << ", ";
     }
-    std::cout << t.shape[i];
+    output << t.shape[i];
   }
-  std::cout << "] dtype=f32 size=" << t.size() << "\n";
+  output << "] dtype=f32 size=" << t.size() << "\n";
 }
 
 // --------------------------------------
 // 输出分数最高的若干个词元及其排名
 // --------------------------------------
-void DumpLogitsTopK(const Tensor& logits, int k) {
+void DumpLogitsTopK(const Tensor& logits, int k, std::ostream& output) {
+  const OutputFormat restore_format(output);
   if (logits.num_dims() != 1) {
-    std::cout << "  logits: invalid shape for top-k dump\n";
+    output << "  logits: invalid shape for top-k dump\n";
     return;
   }
   int vocab_size = logits.shape[0];
@@ -53,40 +90,39 @@ void DumpLogitsTopK(const Tensor& logits, int k) {
   std::partial_sort(pairs.begin(), pairs.begin() + k, pairs.end(),
                     [](const auto& a, const auto& b) { return a.first > b.first; });
 
-  std::cout << "  logits top-" << k << ":\n";
+  output << "  logits top-" << k << ":\n";
   for (int i = 0; i < k; ++i) {
-    std::cout << "    [" << std::setw(3) << i << "] id=" << std::setw(4)
-              << pairs[i].second << " value=" << std::fixed << std::setprecision(6)
-              << pairs[i].first << "\n";
+    output << "    [" << std::setw(3) << i << "] id=" << std::setw(4)
+           << pairs[i].second << " value=" << std::fixed << std::setprecision(6)
+           << pairs[i].first << "\n";
   }
 }
 
 // --------------------------------------
 // 输出键值缓存的配置、形状和当前位置
 // --------------------------------------
-void DumpKvCacheInfo(const KvCache& cache, int current_pos) {
+void DumpKvCacheInfo(const KvCache& cache, int current_pos, std::ostream& output) {
   int n_layers = cache.keys.shape[0];
   int seq_len = cache.keys.shape[1];
   int n_kv_heads = cache.keys.shape[2];
   int head_dim = cache.keys.shape[3];
-  std::cout << "  KV cache: layers=" << n_layers << " seq_len=" << seq_len
-            << " n_kv_heads=" << n_kv_heads << " head_dim=" << head_dim << "\n";
+  output << "  KV cache: layers=" << n_layers << " seq_len=" << seq_len
+         << " n_kv_heads=" << n_kv_heads << " head_dim=" << head_dim << "\n";
   if (current_pos >= 0) {
-    std::cout << "    current_pos: " << current_pos << "\n";
+    output << "    current_pos: " << current_pos << "\n";
   }
-  std::cout << "    keys shape: [" << cache.keys.shape[0] << ", "
-            << cache.keys.shape[1] << ", " << cache.keys.shape[2] << ", "
-            << cache.keys.shape[3] << "]\n";
-  std::cout << "    values shape: [" << cache.values.shape[0] << ", "
-            << cache.values.shape[1] << ", " << cache.values.shape[2] << ", "
-            << cache.values.shape[3] << "]\n";
+  output << "    keys shape: [" << cache.keys.shape[0] << ", " << cache.keys.shape[1]
+         << ", " << cache.keys.shape[2] << ", " << cache.keys.shape[3] << "]\n";
+  output << "    values shape: [" << cache.values.shape[0] << ", "
+         << cache.values.shape[1] << ", " << cache.values.shape[2] << ", "
+         << cache.values.shape[3] << "]\n";
 }
 // --------------------------------------
 // 执行预填充和逐词元解码，统计阶段耗时与吞吐量
 // --------------------------------------
 BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
                              const std::vector<int>& prompt_tokens, int n_predict,
-                             unsigned int seed, bool verbose) {
+                             unsigned int seed, bool verbose, std::ostream& output) {
   BenchmarkResult result;
   result.n_prompt_tokens = static_cast<int>(prompt_tokens.size());
 
@@ -97,7 +133,7 @@ BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
 
   // 预填充：从位置零开始处理全部输入词元
   if (verbose) {
-    std::cout << "[verbose] prefill " << prompt_tokens.size() << " tokens\n";
+    output << "[verbose] prefill " << prompt_tokens.size() << " tokens\n";
   }
 
   // 预填充计时包含批次构造与前向，不包含上下文创建及阶段前后的调试输出
@@ -109,9 +145,9 @@ BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
       std::chrono::duration<double, std::milli>(prefill_end - prefill_start).count();
 
   if (verbose) {
-    DumpTensorShape(logits, "logits");
-    DumpLogitsTopK(logits, 5);
-    DumpKvCacheInfo(ctx.kv_cache, ctx.pos);
+    DumpTensorShape(logits, "logits", output);
+    DumpLogitsTopK(logits, 5, output);
+    DumpKvCacheInfo(ctx.kv_cache, ctx.pos, output);
   }
 
   // 解码：首个生成词元使用预填充结果，后续词元逐步执行前向与采样
@@ -122,7 +158,7 @@ BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
     ++result.n_generated_tokens;
 
     if (verbose) {
-      std::cout << "[verbose] Decode step 0: token=" << next_token << "\n";
+      output << "[verbose] Decode step 0: token=" << next_token << "\n";
     }
 
     // 首次采样不计时；后续循环内的前向、采样和调试输出计入解码耗时
@@ -139,9 +175,8 @@ BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
       ++result.n_generated_tokens;
 
       if (verbose) {
-        std::cout << "[verbose] Decode step " << i << ": token=" << next_token
-                  << "\n";
-        DumpLogitsTopK(logits, 5);
+        output << "[verbose] Decode step " << i << ": token=" << next_token << "\n";
+        DumpLogitsTopK(logits, 5, output);
       }
     }
 
@@ -154,28 +189,10 @@ BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
   }
 
   if (verbose) {
-    DumpKvCacheInfo(ctx.kv_cache, ctx.pos);
+    DumpKvCacheInfo(ctx.kv_cache, ctx.pos, output);
   }
 
   return result;
-}
-
-// 保留 debug.h 已有的输出流重载，复用上面的原始实现。
-BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
-                             const std::vector<int>& prompt_tokens, int n_predict,
-                             unsigned int seed, bool verbose, std::ostream& output) {
-  struct RestoreStdout {
-    std::streambuf* buffer = std::cout.rdbuf();
-    std::ios::fmtflags flags = std::cout.flags();
-    std::streamsize precision = std::cout.precision();
-    ~RestoreStdout() {
-      std::cout.rdbuf(buffer);
-      std::cout.flags(flags);
-      std::cout.precision(precision);
-    }
-  } restore;
-  std::cout.rdbuf(output.rdbuf());
-  return RunBenchmark(model, prompt_tokens, n_predict, seed, verbose);
 }
 
 }  // namespace mini_llama

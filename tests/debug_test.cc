@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <future>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -240,22 +242,75 @@ TEST(DebugUnitTest, InvalidTopKShowsCompleteVocabulary) {
   }
 }
 
-// 输出流重载完成或抛异常后都应恢复 std::cout，避免影响后续 CLI 输出。
-TEST(DebugUnitTest, BenchmarkOutputAdapterRestoresStdout) {
+// 调用期间及异常退出后都不能切换全局 cout 缓冲区。
+TEST(DebugUnitTest, BenchmarkNeverRedirectsStdoutDuringOutput) {
+  class ObservingBuffer : public std::stringbuf {
+   public:
+    std::streambuf* original = std::cout.rdbuf();
+    bool redirected = false;
+
+   private:
+    std::streamsize xsputn(const char* data, std::streamsize count) override {
+      redirected |= std::cout.rdbuf() != original;
+      return std::stringbuf::xsputn(data, count);
+    }
+  } buffer;
+  std::ostream output(&buffer);
+  RunBenchmark(MakeTestModel(), {0}, 2, 42, true, output);
+  EXPECT_FALSE(buffer.redirected);
+}
+
+// 多个调用在独立流上并行运行，详细输出不能串流，静默调用不能产生输出。
+TEST(DebugUnitTest, ConcurrentBenchmarksKeepOutputStreamsIndependent) {
+  const auto model = MakeTestModel();
+  std::ostringstream reference;
+  RunBenchmark(model, {0}, 3, 42, true, reference);
+  auto* original = std::cout.rdbuf();
+  std::promise<void> start;
+  const auto ready = start.get_future().share();
+  std::vector<std::future<std::string>> tasks;
+  for (int i = 0; i < 4; ++i) {
+    tasks.push_back(std::async(std::launch::async, [&, i] {
+      ready.wait();
+      std::ostringstream output;
+      for (int run = 0; run < 10; ++run) {
+        RunBenchmark(model, {0}, 3, 42, i % 2 == 0, output);
+      }
+      return output.str();
+    }));
+  }
+  start.set_value();
+  std::string expected;
+  for (int run = 0; run < 10; ++run) expected += reference.str();
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(tasks[i].get(), i % 2 == 0 ? expected : "");
+  }
+  EXPECT_EQ(std::cout.rdbuf(), original);
+}
+
+// 输出流重载完成或抛异常后都应保留 std::cout 的缓冲区和格式。
+TEST(DebugUnitTest, BenchmarkPreservesStdoutAndTargetFormatting) {
   const auto model = MakeTestModel();
   auto* buffer = std::cout.rdbuf();
   const auto flags = std::cout.flags();
   const auto precision = std::cout.precision();
   std::ostringstream output;
+  output << std::scientific << std::setprecision(2);
+  const auto output_flags = output.flags();
+  const auto output_precision = output.precision();
   RunBenchmark(model, {0}, 2, 42, true, output);
   EXPECT_EQ(std::cout.rdbuf(), buffer);
   EXPECT_EQ(std::cout.flags(), flags);
   EXPECT_EQ(std::cout.precision(), precision);
+  EXPECT_EQ(output.flags(), output_flags);
+  EXPECT_EQ(output.precision(), output_precision);
   EXPECT_NE(output.str().find("Decode step 1"), std::string::npos);
   EXPECT_THROW(RunBenchmark(model, {}, 2, 42, true, output), std::runtime_error);
   EXPECT_EQ(std::cout.rdbuf(), buffer);
   EXPECT_EQ(std::cout.flags(), flags);
   EXPECT_EQ(std::cout.precision(), precision);
+  EXPECT_EQ(output.flags(), output_flags);
+  EXPECT_EQ(output.precision(), output_precision);
 }
 
 // 测试未提供当前位置时省略位置行，但仍保留 KV 缓存的结构信息。

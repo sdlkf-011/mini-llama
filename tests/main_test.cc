@@ -212,6 +212,24 @@ TEST_F(MainTest, MatchingNonDefaultSpecialIdsAreAccepted) {
   EXPECT_NE(result.error.find("status=ok"), std::string::npos);
 }
 
+// 注入的流保留 getline 行为：UTF-8、空行、末行无换行和 EOF 均可区分。
+TEST(TerminalTest, InjectedInputKeepsGetlineSemantics) {
+  std::istringstream input("你好世界\n\nlast");
+  std::ostringstream output;
+  mini_llama::Terminal terminal(input, output);
+  terminal.PrintUserPrompt();
+  EXPECT_EQ(output.str(), "mini-llama > ");
+  std::string line;
+  EXPECT_FALSE(terminal.ReadLine(nullptr));
+  ASSERT_TRUE(terminal.ReadLine(&line));
+  EXPECT_EQ(line, "你好世界");
+  ASSERT_TRUE(terminal.ReadLine(&line));
+  EXPECT_TRUE(line.empty());
+  ASSERT_TRUE(terminal.ReadLine(&line));
+  EXPECT_EQ(line, "last");
+  EXPECT_FALSE(terminal.ReadLine(&line));
+}
+
 // Terminal 直接调用和 run 的 /help 应展示同一份完整说明，/params 只出现一次。
 TEST_F(MainTest, TerminalAndChatShareCompleteCommandHelp) {
   std::istringstream input;
