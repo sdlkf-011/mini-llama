@@ -13,13 +13,14 @@ Tensor ToTensor(const QuantizedTensor& q) {
         "ToTensor: expected F32 QuantizedTensor, got quantized type");
   }
   Tensor t(q.shape, 0.0f);
-  if (q.f32_data.size() == t.data.size()) {
-    t.data = q.f32_data;
+  if (q.f32_data.size() != t.data.size()) {
+    throw std::runtime_error("ToTensor: F32 storage does not match shape");
   }
+  t.data = q.f32_data;
   return t;
 }
 
-// 仅在两种类型之间转换 F32 数据，用于兼容当前仅支持 F32 的计算路径
+// 将 F32 数据和形状复制到带格式标签的权重容器，不执行量化编码
 QuantizedTensor ToQuantizedTensor(const Tensor& t) {
   QuantizedTensor q;
   q.type = QuantType::kF32;

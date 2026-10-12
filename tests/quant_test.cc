@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 #include "mini_llama/ops.h"
@@ -11,6 +12,19 @@
 #include "mini_llama/tensor.h"
 
 namespace {
+
+// F32 转换不能把截断或多余权重静默替换为全零，否则会掩盖模型存储损坏
+TEST(QuantTest, F32ConversionRejectsMismatchedStorage) {
+  mini_llama::Tensor weights({2, 2}, 1.0f);
+  auto encoded = mini_llama::ToQuantizedTensor(weights);
+  EXPECT_EQ(mini_llama::ToTensor(encoded).data, weights.data);
+  encoded.f32_data.pop_back();
+  EXPECT_THROW(mini_llama::ToTensor(encoded), std::runtime_error);
+  EXPECT_THROW(mini_llama::Linear(mini_llama::Tensor({2}, 1.0f), encoded),
+               std::runtime_error);
+  encoded.f32_data.resize(5);
+  EXPECT_THROW(mini_llama::ToTensor(encoded), std::runtime_error);
+}
 
 using mini_llama::BlockQ41;
 using mini_llama::DequantizeFromQ40;

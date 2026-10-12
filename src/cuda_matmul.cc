@@ -1,10 +1,12 @@
 #include "mini_llama/cuda_matmul.h"
 
+#include <cstdio>
 #include <stdexcept>
 
 // CPU 构建不依赖 CUDA SDK；各计算入口在未启用 CUDA 时抛出统一异常
 #ifdef MINI_LLAMA_USE_CUDA
 #include <cublas_v2.h>
+#include <cuda_runtime_api.h>
 #endif
 
 namespace mini_llama {
@@ -85,18 +87,25 @@ void CheckCublas(cublasStatus_t status, const char* expr) {
   }
 }
 
-// 每次计算独占一个句柄，创建前先选择设备
-// 构造成功后，无论正常返回还是后续计算抛异常，均通过析构释放句柄
+// matmul 实现内部按线程、设备保留句柄，退出时在所属设备释放
 class CublasHandle {
  public:
-  explicit CublasHandle(int device_id) {
+  explicit CublasHandle(int device_id) : device_id_(device_id) {
     CudaSetDevice(device_id);
     CheckCublas(cublasCreate(&handle_), "cublasCreate");
   }
 
   ~CublasHandle() {
     if (handle_ != nullptr) {
+      int previous = 0;
+      const bool restore = cudaGetDevice(&previous) == cudaSuccess;
+      const auto status = cudaSetDevice(device_id_);
+      if (status != cudaSuccess) {
+        std::fprintf(stderr, "cuBLAS device selection failed during release: %s\n",
+                     cudaGetErrorString(status));
+      }
       cublasDestroy(handle_);
+      if (restore) cudaSetDevice(previous);
     }
   }
 
@@ -107,7 +116,16 @@ class CublasHandle {
 
  private:
   cublasHandle_t handle_ = nullptr;
+  int device_id_;
 };
+
+cublasHandle_t CachedCublasHandle(int device_id) {
+  CudaSetDevice(device_id);
+  thread_local std::map<int, std::unique_ptr<CublasHandle>> handles;
+  auto& handle = handles[device_id];
+  if (!handle) handle = std::make_unique<CublasHandle>(device_id);
+  return handle->get();
+}
 
 void ValidateMatmulShapes(const Tensor& a, const Tensor& b) {
   if (a.num_dims() != 2 || b.num_dims() != 2) {
@@ -194,7 +212,7 @@ Tensor CudaLinearWithDevicePointer(const Tensor& x, const void* w_device,
   CudaDeviceBuffer y_dev(y.size() * sizeof(float), device_id);
   x_dev.Upload(x.data.data(), x.size() * sizeof(float));
 
-  CublasHandle handle(device_id);
+  const auto handle = CachedCublasHandle(device_id);
   const float alpha = 1.0f;
   const float beta = 0.0f;
 
@@ -204,10 +222,10 @@ Tensor CudaLinearWithDevicePointer(const Tensor& x, const void* w_device,
   // 因此 GEMM 的 (m,n,k)=(O,R,I)，ldc=O；alpha=1、beta=0，不读取原输出
   // Y^T(o,r) 的偏移 o+r*O 等于行主序 Y(r,o)，结果无需物理转置
   CheckCublas(
-      cublasSgemm(handle.get(), CUBLAS_OP_T, CUBLAS_OP_N, out_features, rows,
-                  in_features, &alpha, static_cast<const float*>(w_device),
-                  in_features, static_cast<const float*>(x_dev.data()), in_features,
-                  &beta, static_cast<float*>(y_dev.data()), out_features),
+      cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, out_features, rows, in_features,
+                  &alpha, static_cast<const float*>(w_device), in_features,
+                  static_cast<const float*>(x_dev.data()), in_features, &beta,
+                  static_cast<float*>(y_dev.data()), out_features),
       "cublasSgemm(CudaLinear)");
 
   y_dev.Download(y.data.data(), y.size() * sizeof(float));
@@ -243,17 +261,17 @@ CudaTensor CudaLinearDeviceInputWithDevicePointer(const CudaTensor& x,
                            : std::vector<int>{rows, out_features},
                device_id);
 
-  CublasHandle handle(device_id);
+  const auto handle = CachedCublasHandle(device_id);
   const float alpha = 1.0f;
   const float beta = 0.0f;
 
   // 布局推导与上面的 Linear 相同：权重 OP_T、输入 OP_N，(m,n,k)=(out,rows,in)
   // lda/ldb 保持原存储步长 in，ldc=out；输出由返回的 CudaTensor 独占管理
   CheckCublas(
-      cublasSgemm(handle.get(), CUBLAS_OP_T, CUBLAS_OP_N, out_features, rows,
-                  in_features, &alpha, static_cast<const float*>(w_device),
-                  in_features, static_cast<const float*>(x.data()), in_features,
-                  &beta, static_cast<float*>(y.data()), out_features),
+      cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, out_features, rows, in_features,
+                  &alpha, static_cast<const float*>(w_device), in_features,
+                  static_cast<const float*>(x.data()), in_features, &beta,
+                  static_cast<float*>(y.data()), out_features),
       "cublasSgemm(CudaLinearDeviceInput)");
 
   return y;
@@ -283,7 +301,7 @@ Tensor CudaMatmul(const Tensor& a, const Tensor& b, int device_id) {
   CudaDeviceBuffer c_dev(c.size() * sizeof(float), device_id);
   a_dev.Upload(a.data.data(), a_dev.bytes());
   b_dev.Upload(b.data.data(), b_dev.bytes());
-  CublasHandle handle(device_id);
+  const auto handle = CachedCublasHandle(device_id);
   const float alpha = 1.0f;
   const float beta = 0.0f;
 
@@ -291,7 +309,7 @@ Tensor CudaMatmul(const Tensor& a, const Tensor& b, int device_id) {
   // A/B 的原始字节已对应各自转置的列主序布局，因此交换指针顺序，均使用 OP_N
   // GEMM 的 (m,n,k)=(N,M,K)，三个物理列步长分别为 lda=N、ldb=K、ldc=N
   // C^T(j,i) 的偏移 j+i*N 等于行主序 C(i,j)；下载后可直接返回 [M,N]
-  CheckCublas(cublasSgemm(handle.get(), CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha,
+  CheckCublas(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha,
                           static_cast<const float*>(b_dev.data()), n,
                           static_cast<const float*>(a_dev.data()), k, &beta,
                           static_cast<float*>(c_dev.data()), n),

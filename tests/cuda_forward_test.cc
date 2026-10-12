@@ -39,8 +39,8 @@ TEST_F(CudaForwardTest, SingleAndMultipleTokensDownloadOnly128Logits) {
   }
 }
 
-// 测试目的：验证两层、三 Token 前向的 Linear/Activation/Attention 调用数为 45/45/6；
-// 三次最终 Logits 下载共 1536 字节，计数与实际模型结构和 Forward 次数一致。
+// 三 token batch 逐步计算 logits：Linear/Activation/Attention 为 45/45/6，下载 1536
+// 字节。
 TEST_F(CudaForwardTest, ThreeTokensCountersReflectOperatorStructure) {
   auto model = MakeModel();
   model.config.vocab_size = 128;

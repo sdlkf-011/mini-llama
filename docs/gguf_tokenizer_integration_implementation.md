@@ -223,8 +223,10 @@ ctest --test-dir build/ -R mini-llama-tests --output-on-failure
 ```
 
 该阶段注册了 6 项 GGUF tokenizer 集成测试和 7 项 Chat Template 集成测试，
-当时前缀筛选共 13 项通过。当前 `mini-llama-tests` 前缀还涵盖量化/线程与 GGUF、
-调试等集成用例，不能把该前缀的现有全部测试数写成 13。
+当时前缀筛选共 13 项通过。当前 GGUF tokenizer 与 Chat Template 用例按各自
+测试套件名称注册，可用 `ctest --test-dir build -R 'GgufTokenizer|ChatTemplate'`
+筛选；`mini-llama-tests` 前缀现在仅用于 threaded_matmul_test.cc，不能用于筛选
+本阶段的 tokenizer/template 用例。
 
 使用真实 Qwen2 模型生成一个 token：
 

@@ -3,8 +3,12 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "mini_llama/kv_cache.h"
@@ -180,6 +184,39 @@ TEST(DebugTest, RunBenchmarkVerboseModePrintsDebugInformation) {
   EXPECT_NE(output.find("KV cache: layers=1"), std::string::npos);
 }
 
+// 每次公开接口调用创建独立上下文，重复运行应得到相同计数和生成结果。
+TEST(DebugTest, RepeatedBenchmarkUsesIndependentContexts) {
+  const auto model = MakeTestModel();
+  std::string previous;
+  for (int i = 0; i < 3; ++i) {
+    std::ostringstream output;
+    const auto result = RunBenchmark(model, {0, 1}, 2, 42, true, output);
+    EXPECT_EQ(result.n_prompt_tokens, 2);
+    EXPECT_EQ(result.n_generated_tokens, 2);
+    EXPECT_EQ(result.n_decode_tokens, 1);
+    if (i > 0) EXPECT_EQ(output.str(), previous);
+    previous = output.str();
+  }
+}
+
+// 按原实现，decode 循环内的详细输出属于 decode_ms。
+TEST(DebugTest, VerboseDecodeOutputIsIncludedInTiming) {
+  class SlowBuffer : public std::stringbuf {
+    std::streamsize xsputn(const char* data, std::streamsize count) override {
+      if (std::string(data, static_cast<size_t>(count)).find("Decode step") !=
+          std::string::npos) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      }
+      return std::stringbuf::xsputn(data, count);
+    }
+  } buffer;
+  std::ostream output(&buffer);
+  const auto model = MakeTestModel();
+  const auto result = RunBenchmark(model, {0}, 3, 42, true, output);
+  EXPECT_EQ(result.n_decode_tokens, 2);
+  EXPECT_GE(result.decode_ms, 40.0);
+}
+
 // 测试非正数或超过词表大小的 k 会展示完整词表，并按 logits 降序输出。
 TEST(DebugUnitTest, InvalidTopKShowsCompleteVocabulary) {
   mini_llama::Tensor logits({3}, 0.0f);
@@ -203,16 +240,20 @@ TEST(DebugUnitTest, InvalidTopKShowsCompleteVocabulary) {
   }
 }
 
-// 测试 Top-k 临时设置的小数格式不会改变调用方输出流的 flags 和 precision。
-TEST(DebugUnitTest, TopKPreservesOutputStreamFormatting) {
-  const mini_llama::Tensor logits({1}, 1.0f);
+// 输出流重载完成或抛异常后都应恢复 std::cout，避免影响后续 CLI 输出。
+TEST(DebugUnitTest, BenchmarkOutputAdapterRestoresStdout) {
+  const auto model = MakeTestModel();
+  auto* buffer = std::cout.rdbuf();
   const auto flags = std::cout.flags();
   const auto precision = std::cout.precision();
-
-  testing::internal::CaptureStdout();
-  mini_llama::DumpLogitsTopK(logits, 1);
-  testing::internal::GetCapturedStdout();
-
+  std::ostringstream output;
+  RunBenchmark(model, {0}, 2, 42, true, output);
+  EXPECT_EQ(std::cout.rdbuf(), buffer);
+  EXPECT_EQ(std::cout.flags(), flags);
+  EXPECT_EQ(std::cout.precision(), precision);
+  EXPECT_NE(output.str().find("Decode step 1"), std::string::npos);
+  EXPECT_THROW(RunBenchmark(model, {}, 2, 42, true, output), std::runtime_error);
+  EXPECT_EQ(std::cout.rdbuf(), buffer);
   EXPECT_EQ(std::cout.flags(), flags);
   EXPECT_EQ(std::cout.precision(), precision);
 }

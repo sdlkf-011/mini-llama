@@ -87,6 +87,8 @@ struct CommandOptions {
   std::string dump_logits_dir;
   std::string quant_type;
   bool verbose = false;
+  int benchmark_warmup = 1;
+  int benchmark_repetitions = 3;
   BackendConfig backend;
 };
 
@@ -480,7 +482,9 @@ static void PrintCommandUsage(const char* prog, const std::string& command,
       out << "  --temperature <T>     Sampling temperature (default: 0 = greedy)\n"
           << "  --top-k <k>           Top-k sampling (default: 0 = disabled)\n";
     } else {
-      out << "  --verbose             Print logits and KV cache details\n";
+      out << "  --verbose             Print logits and KV cache details\n"
+          << "  --warmup <n>          Unmeasured warmup runs (default: 1)\n"
+          << "  --repeat <n>          Measured runs (default: 3; positive)\n";
     }
 
     out << "  --quant q8_0|q4_0     Quantize Linear weights before inference\n";
@@ -599,6 +603,10 @@ static CommandOptions ParseOptions(int argc, const char* const argv[],
       }
     } else if (options.command == "bench" && option == "--verbose") {
       options.verbose = true;
+    } else if (options.command == "bench" && option == "--warmup") {
+      options.benchmark_warmup = ParseIntArg(read_value(i, option), option);
+    } else if (options.command == "bench" && option == "--repeat") {
+      options.benchmark_repetitions = ParseIntArg(read_value(i, option), option);
     } else if (options.command == "generate" && option == "--dump-logits") {
       set_path(options.dump_logits_dir, i, option);
     } else {
@@ -609,6 +617,10 @@ static CommandOptions ParseOptions(int argc, const char* const argv[],
   // generate 允许只做 prefill；聊天模式必须留出至少一个响应 token 的预算
   if (options.command == "run" && options.n_predict == 0 && !options.help) {
     throw std::invalid_argument("--n-predict must be positive in run mode");
+  }
+  if (options.command == "bench" && options.benchmark_repetitions == 0 &&
+      !options.help) {
+    throw std::invalid_argument("--repeat must be positive");
   }
   // 所有命令都拒绝 CPU 与显式设备参数冲突；这里只检查 CPU，不查询 GPU。
   if (options.backend.kind == BackendKind::kCpu) {
@@ -1073,6 +1085,53 @@ static int RunGenerate(const LoadedModel& loaded, const CommandOptions& options,
   return 0;
 }
 
+struct BenchmarkMeasurements {
+  BenchmarkResult result;
+  double min_ms = 0.0;
+  double median_ms = 0.0;
+  double max_ms = 0.0;
+  double total_ms() const { return result.prefill_ms + result.decode_ms; }
+  double tokens_per_sec() const {
+    return total_ms() > 0 ? result.n_generated_tokens * 1000.0 / total_ms() : 0;
+  }
+};
+
+static BenchmarkMeasurements MeasureBenchmark(const MiniLlamaModel& model,
+                                              const std::vector<int>& prompt,
+                                              const CommandOptions& options,
+                                              std::ostream& output) {
+  for (int i = 0; i < options.benchmark_warmup; ++i) {
+    ResetModelCudaRuntimeStats(model);
+    RunBenchmark(model, prompt, options.n_predict, options.sampling.seed, false);
+  }
+  BenchmarkMeasurements measurements;
+  std::vector<double> durations;
+  durations.reserve(options.benchmark_repetitions);
+  for (int i = 0; i < options.benchmark_repetitions; ++i) {
+    ResetModelCudaRuntimeStats(model);
+    const auto sample = RunBenchmark(model, prompt, options.n_predict,
+                                     options.sampling.seed, options.verbose, output);
+    auto& result = measurements.result;
+    result.n_prompt_tokens = sample.n_prompt_tokens;
+    result.n_generated_tokens = sample.n_generated_tokens;
+    result.n_decode_tokens = sample.n_decode_tokens;
+    result.prefill_ms += sample.prefill_ms;
+    result.decode_ms += sample.decode_ms;
+    durations.push_back(sample.prefill_ms + sample.decode_ms);
+  }
+
+  measurements.result.prefill_ms /= options.benchmark_repetitions;
+  measurements.result.decode_ms /= options.benchmark_repetitions;
+  std::sort(durations.begin(), durations.end());
+  measurements.min_ms = durations.front();
+  measurements.max_ms = durations.back();
+  const size_t middle = durations.size() / 2;
+  measurements.median_ms = durations.size() % 2
+                               ? durations[middle]
+                               : (durations[middle - 1] + durations[middle]) / 2;
+  return measurements;
+}
+
 // 执行独立基准测试，并把基准结果同步到请求追踪和命令行输出
 static int RunBench(const LoadedModel& loaded, const CommandOptions& options,
                     RequestContext& request, std::ostream& output,
@@ -1088,17 +1147,21 @@ static int RunBench(const LoadedModel& loaded, const CommandOptions& options,
   if (loaded.model.cuda_weights) {
     PrintCudaExecutionSummary(loaded.model, "  ", output);
   }
-  const BenchmarkResult result =
-      RunBenchmark(loaded.model, prompt, options.n_predict, options.sampling.seed,
-                   options.verbose, output);
+  const auto measurements = MeasureBenchmark(loaded.model, prompt, options, output);
+  const auto& result = measurements.result;
   PrintBackendInfo(options.backend, output);
   request.prefill_tokens = result.n_prompt_tokens;
   request.generated_tokens = result.n_generated_tokens;
   request.decode_tokens = result.n_decode_tokens;
   request.prefill_ms = result.prefill_ms;
   request.decode_ms = result.decode_ms;
+  request.RecordEvent(
+      "benchmark_config", 0.0, 0,
+      "warmup=" + std::to_string(options.benchmark_warmup) + ", repetitions=" +
+          std::to_string(options.benchmark_repetitions) + ", timings=per_run_mean");
   request.RecordEvent("prefill", result.prefill_ms, result.n_prompt_tokens,
                       "benchmark");
+
   if (result.n_decode_tokens > 0) {
     request.RecordEvent("decode", result.decode_ms, result.n_decode_tokens,
                         "benchmark");
@@ -1110,16 +1173,20 @@ static int RunBench(const LoadedModel& loaded, const CommandOptions& options,
   output << "mini-llama benchmark\n"
          << "====================\n"
          << "threads: " << GetThreadCount() << '\n'
+         << "warmup runs: " << options.benchmark_warmup << '\n'
+         << "measured runs: " << options.benchmark_repetitions << '\n'
          << "prompt tokens: " << result.n_prompt_tokens << '\n'
          << "generated tokens: " << result.n_generated_tokens << '\n'
          << "decode tokens: " << result.n_decode_tokens << '\n'
          << std::fixed << std::setprecision(3) << "prefill: " << result.prefill_ms
          << " ms\n"
          << "decode: " << result.decode_ms << " ms\n"
-         << "total: " << result.prefill_ms + result.decode_ms << " ms\n"
-         << "throughput: " << result.tokens_per_sec() << " tokens/s\n"
+         << "total: " << measurements.total_ms() << " ms\n"
+         << "inference min/median/max: " << measurements.min_ms << "/"
+         << measurements.median_ms << "/" << measurements.max_ms << " ms\n"
+         << "throughput: " << measurements.tokens_per_sec() << " tokens/s\n"
          << "decode throughput: " << result.decode_tokens_per_sec() << " tokens/s\n"
-         << "tokens/s (total): " << result.tokens_per_sec() << '\n'
+         << "tokens/s (total): " << measurements.tokens_per_sec() << '\n'
          << "tokens/s (Decode): " << result.decode_tokens_per_sec() << '\n';
 
   if (loaded.model.cuda_weights) {
@@ -1130,6 +1197,12 @@ static int RunBench(const LoadedModel& loaded, const CommandOptions& options,
   const size_t f32_bytes = ModelWeightBytesF32(loaded.model);
   output << "  weight memory: actual=" << actual_bytes << " bytes ("
          << FormatMb(actual_bytes) << "), f32 equiv=" << f32_bytes << " bytes\n";
+
+  // F32 等价字节数 / 实际字节数：1x 表示相同大小，大于 1x 表示压缩
+  const double compression_ratio =
+      actual_bytes == 0 ? 0.0 : static_cast<double>(f32_bytes) / actual_bytes;
+  output << "  weight compression ratio (f32/actual): " << compression_ratio
+         << "x\n";
 
   if (baseline_model) {
     const auto error = LogitsError(RunLogitsForTokens(*baseline_model, prompt),

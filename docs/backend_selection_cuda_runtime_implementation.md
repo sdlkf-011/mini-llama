@@ -115,7 +115,8 @@ Attention/CPU 回退、KV 读写、Host/Device 拷贝次数与字节。
 `ResetModelCudaRuntimeStats()` 只清运行统计，共享快照的模型副本也会看到清零。
 完整设备前向在成功操作后累计 Linear、Norm/RoPE/SiLU/Mul/Add、Attention、
 KV 读写和最终 logits 下载；正常路径不做 CPU Attention 回退，不上传激活。
-每次 Forward 下载 `vocab_size * sizeof(float)` 字节。KV Read 按查询头累计
+ForwardBatch 逐 token 调用原有 ForwardToken，每个 token 下载一份 logits，
+单次为 `vocab_size * sizeof(float)` 字节，整批返回最后一份。KV Read 按查询头累计
 逻辑访问，GQA 共享数据重复计入，不等于物理 DRAM 流量。权重上传、缓存设备
 清零与显式调试回读不计入前向拷贝统计。独立 Ops/Quant 接口不接受模型，
 不自行更新这些计数；普通 CPU 前向也不计作 CUDA fallback。
@@ -137,15 +138,21 @@ Embedding、Norm、QKV/bias、RoPE、Attention、O 投影、FFN、残差和 LM H
 CPU Cache；GPU Cache 在首次 CUDA Forward 时分配并设备清零，之后保留历史，
 GPU 路径不镜像更新 CPU Cache。Prefill 与 Decode 仍共用逐 token Forward。
 
-首次 GPU 前向必须从位置 0 开始；已有 Cache 必须匹配设备与模型配置。
-ForwardBatch 的历史连续性检查依赖 `token_history`；直接调用 ForwardToken
-时位置和历史由调用方维护。同配置、同权重的重新上传可继续使用旧 GPU Cache；
+ForwardToken/ForwardBatch 要求 `ctx.model` 指向传入的同一模型对象；此检查
+不跟踪该对象内部权重版本。ForwardBatch 在计算前检查所有 token/position 范围，
+但不保证任意显式 positions 都连续。首次 GPU 前向必须从位置 0 开始；已有
+Cache 必须匹配设备与模型配置。GPU 前向在 `token_history` 非空时还拒绝越过
+已有历史长度的位置；直接调用 ForwardToken 时位置和历史由调用方维护。
+同配置、同权重的重新上传可继续使用旧 GPU Cache；
 实际改变权重、切换后端或外部清空 Cache 时须新建上下文并重放历史。
 清除快照后不能继续使用含 GPU 历史的上下文，新建 CPU 上下文可恢复 CPU 前向。
 
 测试覆盖 CPU/GPU logits 与 KV 对照、Normal/NeoX RoPE、GQA、bias、四种
 Linear、设备权重所有权、缺失/损坏快照和缓存边界，以及 0 H2D / 1 D2H。
-多 GPU、compute-sanitizer、临时 Tensor 和句柄复用仍未验证或实现。
+cuBLAS 句柄、RMSNorm 标量和 Attention 分数工作区已在现有实现文件内部按
+线程、设备复用；超过 64 MiB 的分数工作区临时分配。临时激活 Tensor 保持
+原有分配/释放行为，四个受约束头文件保持原定义，详见
+[五项推理改进](inference_improvements.md)。未验证多 GPU 或 compute-sanitizer。
 
 ## 构建与验证
 
@@ -154,8 +161,9 @@ CMake 默认关闭 `MINI_LLAMA_CUDA`，CPU 构建编译 `.cc` Stub，不需要 C
 `cuda_ops.cu` / `cuda_quant.cu` / `cuda_attention.cu`，链接 `CUDA::cudart` 和 `CUDA::cublas`，
 公开 `MINI_LLAMA_USE_CUDA=1`。C++ / CUDA 标准均为 C++17。
 
-测试只注册存在的源文件；Runtime 与 Tensor 分别使用 `cuda_runtime.` 和
-`cuda_tensor.` 前缀。需要 GPU 的用例在未构建、无设备或设备查询失败时明确
+测试只注册存在的源文件；Runtime 使用 `cuda_runtime.` 前缀，设备 Tensor
+用例并入 `tensor_test.cc`，使用 `CudaTensorTest` / `CudaTensorGpuTest` 名称。
+需要 GPU 的用例在未构建、无设备或设备查询失败时明确
 跳过；设备查询成功后的上传、下载等操作失败仍计为测试失败。复现命令：
 
 ```bash
@@ -164,7 +172,7 @@ cmake --build build -j4
 ctest --test-dir build --output-on-failure -j4
 cmake -S . -B build-cuda -DMINI_LLAMA_CUDA=ON
 cmake --build build-cuda -j4
-ctest --test-dir build-cuda -R 'cuda_runtime|cuda_tensor|ForwardTest' --output-on-failure
+ctest --test-dir build-cuda -R 'cuda_runtime|CudaTensor|ForwardTest' --output-on-failure
 ctest --test-dir build-cuda --output-on-failure --no-tests=error \
   -R 'cuda_matmul|cuda_linear|cuda_forward|cuda_ops|cuda_quant|cuda_kv_cache|cuda_attention'
 ./build-cuda/mini-llama --cuda-info
@@ -193,7 +201,8 @@ clangd --check=src/cuda_ops.cc
 
 最近一次实际全量回归与 CLI/真实模型验证见
 [CLI 同步说明](cli_integration_status.md#回归验证)。
-2026-10-10 单 GPU 回归已实际执行完整设备前向、Q4_1 数值与 CUDA CLI；
+2026-10-12 单 GPU 回归共 236 注册项，228 实际通过、8 跳过、0 失败，
+已实际执行完整设备前向、Q4_1 数值与 CUDA CLI；
 对应链路与逐 token 拷贝验收见[设备驻留 Decode](device_resident_cuda_decode.md)。
 
 以下为 Ops/Quant 阶段的历史回归：CPU 注册 189 项，161 项通过、28 项跳过；

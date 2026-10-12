@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.17)
 
 # 项目配置
 project(mini_llama LANGUAGES CXX)
+find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,6 +68,7 @@ target_include_directories(mini_llama_core
   PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
+target_link_libraries(mini_llama_core PUBLIC Threads::Threads)
 
 # 命令行程序复用 src/main.cc；宏只在该目标中启用全局 main()
 add_executable(mini-llama
@@ -93,6 +95,7 @@ if(BUILD_TESTING)
     NAME backend-cli-smoke
     COMMAND ${CMAKE_COMMAND} -E env
             "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
+            "PYTHONDONTWRITEBYTECODE=1"
             ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/scripts/test_backend_cli.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

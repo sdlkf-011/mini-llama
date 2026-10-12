@@ -1,6 +1,9 @@
 # Device-resident CUDA Decode 实现与验证
 
-验证日期：2026-10-10；环境：C++17、CUDA 12.3 / Clang 18、RTX 4060 Laptop GPU。
+当前回归日期：2026-10-12；环境：C++17、CUDA 12.3 / Clang 18、RTX 4060 Laptop GPU。
+当前 CPU 为 236 注册项、180 通过、56 跳过，CUDA 为 236 注册项、228 通过、
+8 跳过，均无失败；细节见[CLI 同步说明](cli_integration_status.md#回归验证)。
+后文 2026-10-10 的执行日志与数字保留为历史记录。
 
 ## 按指定结构调整
 
@@ -10,7 +13,10 @@
 - Model：按 `UploadF32LinearWeight`、`UploadF32TensorWeight`、`UploadQ80LinearWeight`、`UploadQ40LinearWeight`、`UploadQ41LinearWeight` 和 `UploadLinearWeight` 分发上传。统计 getter/reset 使用既定的 `CudaModelWeights` 字段。量化采用 `QuantizeQtToQ80/Q40`；保留先准备全部结果再提交、权重改变后解除旧 CUDA 快照的既有契约。
 - CLI：使用 `ParseIntArg/ParseFloatArg/ParseUintArg/ParseBackendArg/ParseDeviceArg`、`ValidateBackendOrPrint`、`PrepareCudaWeightsOrPrint`、`PrintBackendInfo`、`FormatMb`、权重分类/执行/运行摘要、`ApplyQuantOverride`、`RunLogitsForTokens` 和 `LogitsError`。新增 `--quant q8_0|q4_0`，Benchmark 可输出模型原始格式与量化格式的 Logits 误差及权重大小。
 
-上下文、模型与 Benchmark 的既定数据结构保持原定义，上一版新增的历史字段、统计继承结构和 Benchmark 字段已移除。`cuda_runtime.h` 与 `cuda_tensor.h` 没有新增接口；缓存内部直接使用设备 memset 清零，`WriteDevice` 接受既有分头布局及同元素数的扁平 Linear 输出，仅同步其接口注释。
+2026-10-10 的结构清理移除了多余历史字段和统计继承结构。后续五项改进保持
+`context.h`、`cuda_runtime.h`、`debug.h`、`cuda_tensor.h` 的原有定义，
+算子工作缓冲区、句柄缓存和额外测量放在现有实现层。
+缓存内部使用设备 memset 清零，`WriteDevice` 接受分头布局及同元素数的扁平 Linear 输出。
 
 为兼容当前仓库，保留已有流注入的 `RunMain/Run`、模型/分词器装配、元数据检查、别名和严格参数校验。提供代码里的 `ValuePtr` 按固定接口使用 `valuePtr`；Linear 的扁平 K/V 直接由 `WriteDevice` 写入相同的连续缓存布局，无需 reshape 或额外 Tensor 拷贝。必需的空 Embedding/Norm 仍报错，只有可选 Bias 可省略，避免将 `Tensor::size()` 与 `data.size()` 的同值比较误当作存储校验。
 
@@ -18,26 +24,33 @@
 
 `GPU Embedding → Attention RMSNorm → Q/K/V（GPU Bias）→ RoPE → KV WriteDevice → CUDA Attention → WO → Residual → FFN RMSNorm → Gate/Up → SiLU × Up → Down → Residual → Final RMSNorm → LM Head → D2H Logits → CPU Sampler`
 
-权重、激活和 KV 历史常驻 GPU，每次 CUDA Forward 只下载一份最终 F32 Logits。Cache 初始化通过设备 memset 清零，避免隐含 H2D 零值上传。所有 Device-input 算子及其调用路径已审查；没有新增 Kernel 或 `cudaDeviceSynchronize`，默认 Stream 上的依赖顺序与最终同步下载保持一致。
+权重、激活和 KV 历史常驻 GPU。`ForwardBatch` 逐 token 调用原有 `ForwardToken`，
+每步执行 Final Norm、LM Head 和一次 logits 下载，整批返回最后一份，不新增
+内部前向接口。Cache 初始化通过设备 memset 清零，避免隐含 H2D 零值上传。
+没有新增 Kernel 或 `cudaDeviceSynchronize`，默认 stream 的依赖顺序与末尾同步下载保持一致。
 
 计数按 `RecordCuda*` 在成功操作后累计。上传与推理统计分开；测试/调试显式回读不纳入模型前向计数。计数器不作为 CUDA 驱动或 cuBLAS 内部操作的全局 profiler。
 
-设 L 为层数、T 为 Forward 次数、B 为每 Token 的 Bias Add 数：
+设 L 为层数、T 为处理 token 数、B 为每 token 的 Bias Add 数：
 
 - Linear：`(7L+1)T`。
-- Activation：`(7L+1+B)T`，包括 Norm、RoPE、SiLU、Mul、Add，不包含 Embedding。RoPE 按一次同时旋转 Q/K 的接口调用计数。
+- Activation：`(7L+B+1)T`，包括 Norm、RoPE、SiLU、Mul、Add，不包含 Embedding。RoPE 按一次同时旋转 Q/K 的接口调用计数。
 - Attention：`LT`；正常 CUDA 主路径 CPU fallback 为 0。
-- H2D：0；D2H：T 次，`T × vocab_size × 4` bytes。
+- H2D：0；D2H 为 T 次，`T × vocab_size × 4` bytes。prefill、decode 与逐步
+  导出都逐 token 返回 logits。
 - KV Write：每 Token 每层 `2 × n_kv_heads × head_dim × 4` bytes。
 - KV Read：每位置每层 `2 × (pos+1) × n_heads × head_dim × 4` bytes。统计各查询头的逻辑 K/V 访问，GQA 的共享数据按查询头重复计入，不代表物理 DRAM 流量。
 
-两层、三 Token、无 Bias、128 词表模型实际验证：Linear **45**、Activation **45**、Attention **6**、H2D **0**、D2H **3 / 1536 bytes**。单次 Forward 验证 D2H 为 **1 / 512 bytes**。
+两层、三 token 普通 batch、无 bias、128 词表模型当前验证：Linear **45**、
+Activation **45**、Attention **6**、H2D **0**、D2H **3 / 1536 bytes**。
+单 token 和逐步导出各自仍下载一份 logits。后文的旧测试数字保留为历史记录。
 
-generate/bench 的 CLI 运行摘要按当前请求的 **Prefill + Decode 总和** 输出；
+generate 的 CLI 运行摘要为当前请求的 **Prefill + Decode 总和**，bench 为
+最后一次正式测量的总和；
 run 的设备计数自权重准备后跨轮累计，`/clear` 只重建会话与 Cache，不清零设备
 计数。不能将多个 Forward 的 D2H 总数理解为每次 Token 的拷贝数。
 
-## 本轮执行与结果
+## 2026-10-10 阶段执行与结果
 
 ```bash
 cmake --build build -j 4
@@ -84,9 +97,16 @@ ctest --test-dir build-cuda --output-on-failure -j 4 \
 
 ## 使用约定与限制
 
-现有头文件不增加缓存快照身份或有效前缀字段；ForwardBatch 的连续位置检查使用已有 `token_history`，直接调用 ForwardToken 时历史位置由调用方管理。同配置的同权重重新上传可继续使用旧 Cache；实际更换权重、切换后端或外部清空 Cache 后，应新建上下文并重放历史。
+现有头文件不增加缓存快照身份或有效前缀字段；前向通过已有 `ctx.model`
+检查模型对象身份，整批输入范围在计算前校验。ForwardBatch 不保证显式位置
+连续；GPU 前向在历史非空时依据 `token_history` 拒绝越过已有历史的位置，
+直接调用 ForwardToken 时历史位置由调用方管理。同配置的同权重重新上传可继续
+使用旧 Cache；实际更换权重、切换后端或外部清空 Cache 后，应新建上下文并重放历史。
 
-只测试单 GPU；未运行 compute-sanitizer。共享快照计数仍沿用既有单调用线程约定。后续可复用临时 Tensor、Attention 工作区及 cuBLAS 句柄；本次没有增加这些优化或依赖。
+只测试单 GPU；未运行 compute-sanitizer。共享快照计数仍沿用既有单调用线程约定。
+当前由 attention/ops/matmul 实现内部按线程、设备缓存分数工作区、归约标量
+及 cuBLAS 句柄，保留 Tensor 独占所有权，不增加独立 workspace 模块；具体行为与验证见
+[五项推理改进](inference_improvements.md)。
 
 ## 移除多余接口后的复验
 
@@ -140,5 +160,5 @@ ctest --test-dir build -R 'backend-cli-smoke|threaded-cli-smoke|golden-logits' \
 ```
 
 CUDA 配置需要本机完整 Toolkit 与兼容编译器，选择方法见
-[README 构建说明](../README.md#构建与使用)。全量测试在 GPU 设备查询失败时
+[README 构建说明](../README.md#构建与测试)。全量测试在 GPU 设备查询失败时
 可能跳过计算用例，应核对跳过名单，不能只凭 CTest 的成功状态认定 GPU 链路通过。

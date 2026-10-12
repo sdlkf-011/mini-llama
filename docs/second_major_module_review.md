@@ -1367,7 +1367,7 @@ stats：交互会话累计消息、上下文和吞吐
 - 三种量化 Linear 已支持 batch 与外层并行；Q8_0/Q4_0 可用 NEON，Q4_1
   点积为 scalar。整模型重量化到 Q8_0/Q4_0 已通过 `--quant` 接入 CLI。
 - F32 Linear 已支持 SIMD 和输出通道级多线程，Matmul 与 CPU Attention 复用
-  `ParallelFor()`；CLI 支持 `--threads`，当前调度逐调用创建/回收线程，
+  `ParallelFor()`；CLI 支持 `--threads`，当前使用按需增长的常驻工作线程，
   详见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。
 - `MiniBatch` 仍逐 token 调用 `ForwardToken()`。
 - Backend/CUDA Runtime、四种格式的模型上传、设备算子、GPU Attention/KV Cache

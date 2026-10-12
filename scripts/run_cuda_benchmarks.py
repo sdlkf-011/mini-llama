@@ -35,6 +35,12 @@ METRICS = {
     "tokens_per_sec_total": ("tokens/s (total)", "throughput"),
     "tokens_per_sec_decode": ("tokens/s (decode)", "decode throughput"),
 }
+OPTIONAL_METRICS = {
+    "sample_ms": ("sample",),
+    "output_ms": ("verbose output",),
+    "warmup_runs": ("warmup runs",),
+    "measured_runs": ("measured runs",),
+}
 COUNTERS = {
     "linear_calls": "cuda linear calls",
     "activation_calls": "cuda activation calls",
@@ -136,8 +142,9 @@ def make_cases(q4_model=None):
 def parse_benchmark_stdout(stdout):
     """Parse current and historical labels; require metrics and validate units.
 
-    Counters describe cumulative prefill + decode work. Old logs without a Total
-    label derive it from prefill + decode and identify this in derived_metrics.
+    Counters describe cumulative prefill + decode work. Logs without a Total
+    label derive it from prefill + decode, adding sample when present, and record
+    this in derived_metrics.
     Missing or malformed values raise ValueError instead of silently becoming 0.
     """
     metrics, weights, counters = {}, {}, {}
@@ -147,16 +154,17 @@ def parse_benchmark_stdout(stdout):
         if ":" not in line:
             continue
         label, value = (part.strip() for part in line.split(":", 1))
-        for key, aliases in METRICS.items():
+        for key, aliases in {**METRICS, **OPTIONAL_METRICS}.items():
             if label in aliases:
-                suffix = "ms" if key.endswith("_ms") and label in ("prefill", "decode", "total") else ""
+                suffix = "ms" if key.endswith("_ms") and label in ("prefill", "decode", "total", "sample", "verbose output") else ""
                 if label in ("throughput", "decode throughput"):
                     suffix = "tokens/s"
-                pattern = r"(\d+)" if key.endswith("_tokens") else r"([+\-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+\-]?\d+)?)"
+                integer = key.endswith(("_tokens", "_runs"))
+                pattern = r"(\d+)" if integer else r"([+\-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+\-]?\d+)?)"
                 match = re.fullmatch(pattern + (r"\s+" + re.escape(suffix) if suffix else ""), value)
                 if not match:
                     raise ValueError(f"invalid metric {label}: {value}")
-                number = int(match[1]) if key.endswith("_tokens") else float(match[1])
+                number = int(match[1]) if integer else float(match[1])
                 if not math.isfinite(number) or number < 0:
                     raise ValueError(f"nonfinite/negative metric {label}")
                 if key in metrics and metrics[key] != number:
@@ -187,15 +195,17 @@ def parse_benchmark_stdout(stdout):
                     counters[key.replace("copies", "bytes")] = int(match[2])
     derived = []
     if "total_ms" not in metrics and all(k in metrics for k in ("prefill_ms", "decode_ms")):
-        metrics["total_ms"] = metrics["prefill_ms"] + metrics["decode_ms"]
+        metrics["total_ms"] = metrics["prefill_ms"] + metrics["decode_ms"] + metrics.get("sample_ms", 0)
         derived.append("total_ms")
     missing = set(METRICS) - metrics.keys()
     if missing:
         raise ValueError("missing metrics: " + ", ".join(sorted(missing)))
     if metrics["prompt_tokens"] <= 0 or metrics["decode_tokens"] != max(metrics["generated_tokens"] - 1, 0):
         raise ValueError("invalid prompt/generated/decode token counts")
-    if abs(metrics["total_ms"] - metrics["prefill_ms"] - metrics["decode_ms"]) > 0.002:
-        raise ValueError("total time disagrees with prefill + decode")
+    if abs(metrics["total_ms"] - metrics["prefill_ms"] - metrics["decode_ms"] - metrics.get("sample_ms", 0)) > 0.002:
+        raise ValueError("total time disagrees with forward + sample")
+    if "measured_runs" in metrics and metrics["measured_runs"] <= 0:
+        raise ValueError("measured runs must be positive")
     for count, duration, throughput in (("generated_tokens", "total_ms", "tokens_per_sec_total"),
                                         ("decode_tokens", "decode_ms", "tokens_per_sec_decode")):
         if metrics[count] and (metrics[duration] <= 0 or metrics[throughput] <= 0):
@@ -308,22 +318,25 @@ def validate_cuda(parsed, quant):
     counters = parsed["cuda_counters"].get("total", {})
     metrics = parsed["metrics"]
     forwards = metrics["prompt_tokens"] + metrics["decode_tokens"]
+    # 当前逐 token 计算 logits；兼容此前独立采样计时版本的末尾 logits 路径。
+    logits = 1 + metrics["decode_tokens"] if "sample_ms" in metrics else forwards
     required = set(COUNTERS) | {"host_to_device_bytes", "device_to_host_bytes"}
     if required - counters.keys():
         raise ValueError("missing cumulative CUDA counters")
-    if counters["linear_calls"] != linears * forwards or counters["attention_calls"] != layers * forwards:
+    if counters["linear_calls"] != (linears - 1) * forwards + logits or counters["attention_calls"] != layers * forwards:
         raise ValueError("unexpected cumulative Linear/Attention calls")
     if counters["cpu_attention_fallback_calls"] or counters["host_to_device_copies"] or counters["host_to_device_bytes"]:
         raise ValueError("CPU attention fallback or H2D transfer detected")
-    if counters["device_to_host_copies"] != forwards:
+    if counters["device_to_host_copies"] != logits:
         raise ValueError("unexpected cumulative logits D2H copies")
     if any(counters[key] <= 0 for key in
            ("activation_calls", "kv_write_bytes", "kv_read_bytes", "device_to_host_bytes")):
         raise ValueError("missing activation/KV/logits work")
-    # KV writes/logits downloads scale with forwards; attention reads sum the
-    # history lengths 1..forwards. Precise sizes are checked by CUDA CTests.
+    # KV 写入随前向 token 数增长，下载随 logits 次数增长；注意力读取累加历史长度。
+    # 精确的字节数由 CUDA CTest 校验。
     for key in ("kv_write_bytes", "device_to_host_bytes", "kv_read_bytes"):
-        work = forwards * (forwards + 1) // 2 if key == "kv_read_bytes" else forwards
+        work = (forwards * (forwards + 1) // 2 if key == "kv_read_bytes"
+                else logits if key == "device_to_host_bytes" else forwards)
         unit, remainder = divmod(counters[key], work)
         if remainder or unit == 0:
             raise ValueError(f"inconsistent per-token/position CUDA bytes: {key}")
@@ -546,7 +559,7 @@ def build_markdown(report):
               "total is sampled before quantization-error reference forwards. Counters cover instrumented forward calls, "
               "not all CUDA Runtime API operations; allocations and D2D copies are excluded. "
               "Zero cumulative H2D implies zero Decode H2D; nonzero totals cannot locate the phase. "
-              "D2H logits for CPU sampling are expected once per prompt/decode forward.", ""]
+              "Current D2H logits are expected once per prefill token and once per decode forward.", ""]
     for case in report["benchmarks"]:
         if case["backend"] != "cuda":
             continue
@@ -580,7 +593,7 @@ def write_json(path, report):
 
 def write_csv(path, report):
     fields = ["name", "model", "backend", "quant", "quant_override", "status", "reason",
-              "prompt", "n_predict", "seed", "threads", *METRICS, "speedup_decode",
+              "prompt", "n_predict", "seed", "threads", *METRICS, *OPTIONAL_METRICS, "speedup_decode",
               "duration_s", "counter_validation", "uploaded_weights", "gpu_memory_used"]
     fields += [f"{quant}_{key}" for quant in WEIGHTS for key in ("uploaded", "expected")]
     runtime_keys = list(COUNTERS) + ["host_to_device_bytes", "device_to_host_bytes"]

@@ -88,6 +88,9 @@ static void ValidateLayerWeights(const LayerWeights& weights,
 // 在进入数值计算前集中验证模型状态、输入范围、缓存和全部权重
 static void ValidateForwardInputs(const MiniLlamaContext& ctx,
                                   const MiniLlamaModel& model, int token) {
+  if (ctx.model != &model) {
+    throw std::runtime_error("ForwardToken: context belongs to a different model");
+  }
   const ModelConfig& c = model.config;
   if (!model.loaded) {
     throw std::runtime_error("ForwardToken called with an unloaded model");
@@ -845,8 +848,7 @@ Tensor ForwardToken(MiniLlamaContext& ctx, const MiniLlamaModel& model, int toke
       x = ForwardLayerDevice(ctx, model, x, layer, model.layers[layer],
                              model.config);
     }
-    auto logits = ComputeLogitsDevice(x, model, model.config);
-    return logits;
+    return ComputeLogitsDevice(x, model, model.config);
   }
 
   if (!ctx.cuda_kv_cache.empty()) {

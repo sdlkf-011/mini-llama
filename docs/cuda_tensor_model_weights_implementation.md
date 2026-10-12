@@ -194,7 +194,7 @@ ctest --test-dir build-cuda \
 设备 Tensor 新增 5 项测试：空对象传输与移动、非法形状/溢出、CPU stub
 分配失败、真实 GPU 上传下载与移动，以及失败 Reset 保留 shape 和数据。
 
-前向专项现有 12 项：原有 6 项加上 F32/Q8_0 参数化的 6 项扩展测试。
+该阶段前向专项共 12 项：原有 6 项加上 F32/Q8_0 参数化的 6 项扩展测试。
 扩展测试覆盖两层非零 FFN、GQA、可选 bias、RoPE 布局与量化尾块：
 
 - 批量 prefill/decode 与逐 token CPU 执行的 logits、KV 和序列状态一致。

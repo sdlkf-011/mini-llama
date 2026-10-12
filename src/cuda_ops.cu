@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -12,6 +13,14 @@
 namespace mini_llama {
 
 namespace {
+
+// 默认 stream 上的 RMSNorm 调用复用每线程、每设备的一个平方和缓冲区
+CudaDeviceBuffer& RmsNormSumBuffer(int device_id) {
+  thread_local std::map<int, CudaDeviceBuffer> buffers;
+  auto& buffer = buffers[device_id];
+  if (buffer.empty()) buffer.Reset(sizeof(float), device_id);
+  return buffer;
+}
 
 constexpr int kBlockSize = 256;
 
@@ -473,7 +482,7 @@ CudaTensor CudaRmsNormDeviceInput(const CudaTensor& x, const Tensor& weight,
   return CudaRmsNormDeviceWeight(x, w_dev.data(), weight.shape, eps, device_id);
 }
 
-// 输入/权重/输出均在设备；仅临时分配平方和，并在每次计算前清零
+// 输入/权重/输出均在设备；复用平方和缓冲区，并在每次计算前清零
 CudaTensor CudaRmsNormDeviceWeight(const CudaTensor& x, const void* weight_data,
                                    const std::vector<int>& weight_shape, float eps,
                                    int device_id) {
@@ -481,7 +490,7 @@ CudaTensor CudaRmsNormDeviceWeight(const CudaTensor& x, const void* weight_data,
   CudaSetDevice(device_id);
 
   CudaTensor y(x.shape(), device_id);
-  CudaDeviceBuffer sum_dev(sizeof(float), device_id);
+  auto& sum_dev = RmsNormSumBuffer(device_id);
   CheckCudaOps(cudaMemset(sum_dev.data(), 0, sizeof(float)),
                "cudaMemset(RmsNorm sum)");
 

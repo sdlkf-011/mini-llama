@@ -2,8 +2,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <exception>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -11,7 +15,7 @@ namespace mini_llama {
 
 // 进程级线程数配置：正数表示显式指定，0 表示自动使用硬件并发数
 // 原子读写允许配置与查询并发进行；该变量不用于发布其他共享数据，
-// 因此使用 relaxed 内存序即可，任务数据的同步由 thread 启动和 join 完成
+// 因此使用 relaxed 内存序即可，任务提交和完成通过互斥锁与条件变量同步
 static std::atomic<int> g_thread_count{0};
 
 // 优先使用显式配置；hardware_concurrency() 无法提供结果时可能返回 0
@@ -29,75 +33,119 @@ void SetThreadCount(int n) {
   g_thread_count.store(n > 0 ? n : 0, std::memory_order_relaxed);
 }
 
-// 同步执行 [0, n) 上的任务：回调收到连续的半开区间 [begin, end)
-// 回调应只读共享输入，并只写自己的输出区间；本函数不替回调保护共享状态
-void ParallelFor(int n, const std::function<void(int begin, int end)>& fn) {
-  // 空任务不启动线程，也不调用 fn，后续切分只需处理正数 n
-  if (n <= 0) {
-    return;
+namespace {
+// 工作线程里的嵌套 ParallelFor 串行执行，避免等待同一池中的空闲线程
+thread_local bool is_pool_worker = false;
+
+struct ParallelBatch {
+  explicit ParallelBatch(int count, const std::function<void(int, int)>& callback)
+      : remaining(count), exceptions(count), fn(callback) {}
+  std::mutex mutex;
+  std::condition_variable done;
+  int remaining;
+  std::vector<std::exception_ptr> exceptions;
+  const std::function<void(int, int)>& fn;
+};
+
+struct ParallelTask {
+  std::shared_ptr<ParallelBatch> batch;
+  int index;
+  int begin;
+  int end;
+};
+
+class ThreadPool {
+ public:
+  ~ThreadPool() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopping_ = true;
+    }
+    ready_.notify_all();
+    for (auto& thread : threads_) thread.join();
   }
 
-  // 本次调用只读取一次配置，并限制线程数不超过任务数
-  // 后续 SetThreadCount() 的修改不会改变已经确定的区间切分
-  const int n_threads = std::min(GetThreadCount(), n);
+  void Run(int n, int count, const std::function<void(int, int)>& fn) {
+    auto batch = std::make_shared<ParallelBatch>(count, fn);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      // 先 reserve，后启动线程；启动失败时已创建线程由 pool 持有并最终 join
+      threads_.reserve(std::max(threads_.size(), static_cast<size_t>(count)));
+      while (threads_.size() < static_cast<size_t>(count)) {
+        threads_.emplace_back([this] { Worker(); });
+      }
+      const size_t original_size = tasks_.size();
+      int begin = 0;
+      try {
+        for (int index = 0; index < count; ++index) {
+          const int end = begin + n / count + (index < n % count ? 1 : 0);
+          tasks_.push_back({batch, index, begin, end});
+          begin = end;
+        }
+      } catch (...) {
+        // 队列锁阻止工作线程取走半批任务；入队失败时整体撤回本次提交
+        while (tasks_.size() > original_size) tasks_.pop_back();
+        throw;
+      }
+    }
+    ready_.notify_all();
+    {
+      std::unique_lock<std::mutex> lock(batch->mutex);
+      batch->done.wait(lock, [&] { return batch->remaining == 0; });
+    }
+    for (const auto& error : batch->exceptions) {
+      if (error) std::rethrow_exception(error);
+    }
+  }
 
-  // 每线程至少分配 16 个任务，减少线程创建、调度和 join 的额外开销
+ private:
+  void Worker() {
+    is_pool_worker = true;
+    for (;;) {
+      ParallelTask task;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ready_.wait(lock, [&] { return stopping_ || !tasks_.empty(); });
+        if (stopping_ && tasks_.empty()) return;
+        task = std::move(tasks_.front());
+        tasks_.pop_front();
+      }
+      try {
+        task.batch->fn(task.begin, task.end);
+      } catch (...) {
+        task.batch->exceptions[task.index] = std::current_exception();
+      }
+      bool finished;
+      {
+        std::lock_guard<std::mutex> lock(task.batch->mutex);
+        finished = --task.batch->remaining == 0;
+      }
+      if (finished) task.batch->done.notify_one();
+    }
+  }
+
+  std::mutex mutex_;
+  std::condition_variable ready_;
+  std::deque<ParallelTask> tasks_;
+  std::vector<std::thread> threads_;
+  bool stopping_ = false;
+};
+
+ThreadPool& Workers() {
+  static ThreadPool pool;
+  return pool;
+}
+}  // namespace
+
+void ParallelFor(int n, const std::function<void(int begin, int end)>& fn) {
+  if (n <= 0) return;
+  const int count = std::min(GetThreadCount(), n);
   constexpr int kMinChunk = 16;
-  // 除法比较等价于 n < n_threads * kMinChunk，并避免线程数乘法溢出
-  if (n_threads == 1 || n_threads > n / kMinChunk) {
+  if (is_pool_worker || count == 1 || count > n / kMinChunk) {
     fn(0, n);
     return;
   }
-
-  // 每个线程使用独立异常槽，join 后统一检查，并行区域不需要锁
-  // 异常槽放在工作线程作用域之外，确保引用它们的线程先结束，再销毁槽
-  std::vector<std::exception_ptr> exceptions(n_threads);
-  {
-    std::vector<std::thread> threads;
-    // 在启动线程之前预留全部容量，避免线程启动后再扩容容器
-    threads.reserve(n_threads);
-    // 正常退出、回调抛异常或后续线程创建失败，都先回收已启动线程
-    // 回收对象在 threads 之后构造、之前析构；emplace_back 抛异常时也会 join，
-    // 防止销毁仍处于 joinable 状态的 std::thread 导致进程终止
-    struct JoinThreads {
-      std::vector<std::thread>& threads;
-      ~JoinThreads() {
-        for (auto& thread : threads) {
-          if (thread.joinable()) {
-            thread.join();
-          }
-        }
-      }
-    } join_threads{threads};
-
-    // 每个线程取得 chunk 个任务，前 remainder 个线程各多分配一个
-    // 例如 n=67、线程数=3，区间为 [0,23)、[23,45)、[45,67)
-    const int chunk = n / n_threads;
-    const int remainder = n % n_threads;
-    int start = 0;
-    for (int t = 0; t < n_threads; ++t) {
-      const int count = chunk + (t < remainder ? 1 : 0);
-      const int end = start + count;
-      // 区间和线程编号按值捕获，避免循环继续推进后工作线程读到新的 start
-      // fn 和异常槽按引用捕获，其生命周期由本次同步调用和 join 保证
-      threads.emplace_back([start, end, t, &fn, &exceptions]() {
-        try {
-          fn(start, end);
-        } catch (...) {
-          // 异常不能逃出线程入口；先记录在本线程的槽中，交给调用线程处理
-          exceptions[t] = std::current_exception();
-        }
-      });
-      start = end;
-    }
-  }
-
-  // 按线程编号检查并重新抛出遇到的第一个异常，其他线程此时也已完成回收
-  for (const auto& exception : exceptions) {
-    if (exception) {
-      std::rethrow_exception(exception);
-    }
-  }
+  Workers().Run(n, count, fn);
 }
 
 }  // namespace mini_llama

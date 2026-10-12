@@ -19,6 +19,13 @@
   Q4_1 使用 scalar 点积。
 - `RmsNorm`、`Softmax`、`Silu`、`ElementwiseMul`、`SwiGlu` 和 `ArgMax` 提供推理所需的基础逐元素及归约算子。
 
+Tensor 的 shape/data 为公开字段，底层索引和算子要求调用方维持二者一致；它不是
+自动维护任意外部修改的通用容器。`Tensor({})` 构造一个标量，默认 `Tensor()`
+则为空对象，使用元素访问前应先初始化有效存储。
+
+2026-10-12 全项目检查修正 F32 权重转换：`ToTensor()` 在数据长度不符合 shape
+时直接报错，不再静默返回全零张量；对应 `Linear()` 也会拒绝损坏的 F32 权重。
+
 ## 正确性审查
 
 本阶段在单元测试中加入小规模、可手算的矩阵和向量，覆盖正常结果、输出 shape、边界检查、维度错误和数值稳定性。审查发现并修正了以下问题：
@@ -39,7 +46,7 @@
 - 2×3 与 3×2 矩阵乘法，验证当前朴素 dispatch 模式和错误维度处理。
 - 一维与二维 Linear、RMSNorm、稳定 Softmax、Silu、逐元素乘法、SwiGLU 和 ArgMax。
 
-`tests/threaded_matmul_test.cc` 现有 14 项测试，覆盖多种执行模式和线程数、SIMD
+`tests/threaded_matmul_test.cc` 现有 17 项测试，覆盖多种执行模式和线程数、SIMD
 尾部、小任务、非整除切分、回调异常，以及带 bias/GQA 的并行 Attention；量化
 测试覆盖 batch、块尾部、非法输入、兼容接口、误差比较和 Q4_0 舍入边界。
 实现与测试矩阵见[CPU 多线程与 F32 SIMD 实现说明](cpu_threaded_inference_implementation.md)。

@@ -90,7 +90,7 @@ def main() -> None:
             require(tokens is not None, "missing generated token IDs")
             generated_lines.append(tokens.group(0))
             bench_output = run_cli(binary, "bench", *common, "--threads", str(threads),
-                                   "--verbose")
+                                   "--warmup", "0", "--repeat", "1", "--verbose")
             check_threads(bench_output, threads)
             for label in ("[verbose] prefill", "tokens/s (total):", "tokens/s (Decode):"):
                 require(label in bench_output, f"bench is missing {label}")

@@ -129,7 +129,8 @@ size_t ModelCudaUploadedQ41WeightCount(const MiniLlamaModel& model);
 size_t ModelCudaMemoryBytes(const MiniLlamaModel& model);
 
 // 仅清零运行统计，保留设备权重及上传统计；共享快照的模型副本也会看到清零
-void ResetModelCudaRuntimeStats(MiniLlamaModel& model);
+
+void ResetModelCudaRuntimeStats(const MiniLlamaModel& model);
 
 // 读取已记录的 CUDA Linear 调用次数；以下运行统计接口无快照时均返回零
 size_t ModelCudaLinearCalls(const MiniLlamaModel& model);
