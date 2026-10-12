@@ -98,6 +98,19 @@ TEST_F(MainTest, BenchmarkCommandPrintsStatisticsAndVerboseDetails) {
             std::string::npos);
 }
 
+TEST_F(MainTest, BenchmarkAcceptsWarmupAndRepeatOnlyInBenchMode) {
+  const auto result = Invoke({"mini-llama", "bench", kModelDir, "-n", "2",
+                              "--warmup", "1", "--repeat", "2"});
+  ASSERT_EQ(result.status, 0) << result.error;
+  EXPECT_NE(result.output.find("warmup runs: 1"), std::string::npos);
+  EXPECT_NE(result.output.find("measured runs: 2"), std::string::npos);
+  EXPECT_NE(result.output.find("inference min/median/max:"), std::string::npos);
+  EXPECT_EQ(result.output.find("sample:"), std::string::npos);
+  EXPECT_EQ(Invoke({"mini-llama", "bench", kModelDir, "--repeat", "0"}).status, 1);
+  EXPECT_EQ(Invoke({"mini-llama", "generate", kModelDir, "--warmup", "1"}).status,
+            1);
+}
+
 // 选项值中的标志字样是文本，不能被帮助扫描或资源路径扫描吞掉。
 TEST_F(MainTest, PromptValuesAreNotReinterpretedAsOptions) {
   for (const auto* prompt : {"--help", "--model"}) {
@@ -197,6 +210,24 @@ TEST_F(MainTest, MatchingNonDefaultSpecialIdsAreAccepted) {
   EXPECT_EQ(result.status, 0) << result.error;
   EXPECT_NE(result.error.find("prompt_tokens=2"), std::string::npos);
   EXPECT_NE(result.error.find("status=ok"), std::string::npos);
+}
+
+// 注入的流保留 getline 行为：UTF-8、空行、末行无换行和 EOF 均可区分。
+TEST(TerminalTest, InjectedInputKeepsGetlineSemantics) {
+  std::istringstream input("你好世界\n\nlast");
+  std::ostringstream output;
+  mini_llama::Terminal terminal(input, output);
+  terminal.PrintUserPrompt();
+  EXPECT_EQ(output.str(), "mini-llama > ");
+  std::string line;
+  EXPECT_FALSE(terminal.ReadLine(nullptr));
+  ASSERT_TRUE(terminal.ReadLine(&line));
+  EXPECT_EQ(line, "你好世界");
+  ASSERT_TRUE(terminal.ReadLine(&line));
+  EXPECT_TRUE(line.empty());
+  ASSERT_TRUE(terminal.ReadLine(&line));
+  EXPECT_EQ(line, "last");
+  EXPECT_FALSE(terminal.ReadLine(&line));
 }
 
 // Terminal 直接调用和 run 的 /help 应展示同一份完整说明，/params 只出现一次。

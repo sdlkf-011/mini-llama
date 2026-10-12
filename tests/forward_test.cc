@@ -203,6 +203,84 @@ TEST(ForwardTest, RejectsInvalidBatch) {
   EXPECT_TRUE(context.token_history.empty());
 }
 
+// 形状相同的不同模型不能共用上下文，拒绝时保留已有状态。
+TEST(ForwardTest, ContextRejectsDifferentModelBeforeChangingState) {
+  auto model = MakeTestModel();
+  auto different_model = model;
+  different_model.token_embedding.data[0] += 1.0f;
+  MiniLlamaContext context(&model);
+  ForwardBatch(context, model, MiniBatch::Single(0, 0));
+  const auto keys = context.kv_cache.keys.data;
+  const auto values = context.kv_cache.values.data;
+  EXPECT_THROW(ForwardBatch(context, different_model, MiniBatch::Single(1, 1)),
+               std::runtime_error);
+  EXPECT_THROW(ForwardToken(context, different_model, 1), std::runtime_error);
+  EXPECT_EQ(context.pos, 0);
+  EXPECT_EQ(context.token_history, std::vector<int>({0}));
+  EXPECT_EQ(context.kv_cache.keys.data, keys);
+  EXPECT_EQ(context.kv_cache.values.data, values);
+  MiniLlamaContext unbound;
+  EXPECT_THROW(ForwardToken(unbound, model, 0), std::runtime_error);
+  MiniLlamaContext fresh(&different_model);
+  EXPECT_NO_THROW(ForwardBatch(fresh, different_model, MiniBatch::Single(1, 0)));
+}
+
+// 后段输入越界必须在任何前向执行之前被拒绝，保留已有历史和 KV 内容。
+TEST(ForwardTest, InvalidBatchSuffixPreservesContext) {
+  auto model = MakeTestModel();
+  MiniLlamaContext context(&model);
+  ForwardBatch(context, model, MiniBatch::Single(0, 0));
+  const auto keys = context.kv_cache.keys.data;
+  const auto values = context.kv_cache.values.data;
+  const std::vector<MiniBatch> invalid_batches = {
+      {{1, -1}, {1, 2}},
+      {{1, model.config.vocab_size}, {1, 2}},
+      {{1, 2}, {1, -1}},
+      {{1, 2}, {1, model.config.max_seq_len}},
+  };
+  for (const auto& batch : invalid_batches) {
+    EXPECT_THROW(ForwardBatch(context, model, batch), std::out_of_range);
+    EXPECT_EQ(context.pos, 0);
+    EXPECT_EQ(context.token_history, std::vector<int>({0}));
+    EXPECT_EQ(context.kv_cache.keys.data, keys);
+    EXPECT_EQ(context.kv_cache.values.data, values);
+  }
+}
+
+// 回退后重放分支应与新上下文一致，并保留 KV 分配与累计计算计数。
+TEST(ForwardTest, RetainedPrefixReplaysLikeFreshContext) {
+  auto model = MakeTestModel();
+  MiniLlamaContext context(&model);
+  ForwardBatch(context, model, MiniBatch::FromTokens({0, 1, 2}));
+  context.n_prefill_tokens = 3;
+  context.n_decode_tokens = 2;
+  const float* keys = context.kv_cache.keys.data.data();
+  const float* values = context.kv_cache.values.data.data();
+
+  context.token_history.resize(1);
+  context.pos = 0;
+  EXPECT_EQ(context.pos, 0);
+  EXPECT_EQ(context.token_history, std::vector<int>({0}));
+  EXPECT_EQ(context.n_prefill_tokens, 3);
+  EXPECT_EQ(context.n_decode_tokens, 2);
+  const auto actual = ForwardBatch(context, model, MiniBatch::FromTokens({2, 1}, 1));
+  MiniLlamaContext reference(&model);
+  const auto expected =
+      ForwardBatch(reference, model, MiniBatch::FromTokens({0, 2, 1}));
+  ExpectTensorNear(actual, expected);
+  ExpectTensorNear(context.kv_cache.keys, reference.kv_cache.keys);
+  ExpectTensorNear(context.kv_cache.values, reference.kv_cache.values);
+  EXPECT_EQ(context.kv_cache.keys.data.data(), keys);
+  EXPECT_EQ(context.kv_cache.values.data.data(), values);
+  EXPECT_EQ(context.token_history, reference.token_history);
+  EXPECT_EQ(context.pos, reference.pos);
+
+  context = MiniLlamaContext(&model);
+  MiniLlamaContext restarted(&model);
+  ExpectTensorNear(ForwardBatch(context, model, MiniBatch::Single(2, 0)),
+                   ForwardBatch(restarted, model, MiniBatch::Single(2, 0)));
+}
+
 // 使用非零 FFN、GQA、偏置和非完整 Q8_0 块，验证现有 CPU 前向。
 MiniLlamaModel MakeExtendedTestModel(bool q80) {
   MiniLlamaModel model;

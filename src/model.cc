@@ -409,7 +409,7 @@ size_t ModelCudaMemoryBytes(const MiniLlamaModel& model) {
 }
 
 // 清零执行统计，保留权重、上传统计和显存所有权
-void ResetModelCudaRuntimeStats(MiniLlamaModel& model) {
+void ResetModelCudaRuntimeStats(const MiniLlamaModel& model) {
   if (!model.cuda_weights) {
     return;
   }

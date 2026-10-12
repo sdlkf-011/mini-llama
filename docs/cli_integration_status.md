@@ -21,7 +21,7 @@ CUDA 构建中编译，链接 Runtime 和 cuBLAS，C++ / CUDA 标准均为 C++17
 | --- | --- |
 | `generate` | 单轮生成，默认教学模型、`hello`、16 个生成 token |
 | `run` | 多轮聊天，需要模型路径，默认每轮最多生成 64 个 token |
-| `bench` | 默认生成预算 16，测量预填充与逐 token 解码性能，可用 `--verbose` 输出调试信息 |
+| `bench` | 默认生成预算 16、预热 1 次、测量 3 次，统计前向与采样，可用 `--verbose` 输出调试信息 |
 | `inspect` | 检查 JSON 清单或 GGUF 元数据，不加载模型权重或分词器 |
 | `inspect-gguf` | 直接检查 GGUF 文件头、元数据和张量目录 |
 | `--cuda-info` | 查询 CUDA Runtime 构建状态和真实 GPU 信息，失败时返回非零 |
@@ -81,10 +81,11 @@ Linear 可执行 GGUF Q8_0/Q4_0/Q4_1 权重，CUDA 上传与前向也支持这�
 ```
 
 CUDA 摘要的 `gpu memory used` 仅指上传权重的显存，不含 KV Cache 和临时激活。
-generate/bench 的运行摘要累计当前请求的 Prefill + Decode；run 的设备计数
-自权重准备后跨轮累计，`/clear` 重建会话与 Cache，不重置模型设备计数。
-每次 Forward 的 D2H 是
-`vocab_size * 4` 字节。共享快照计数采用单调用线程约定。
+generate 的运行摘要累计当前请求的 Prefill + Decode；bench 对应最后一次正式
+测量；run 的设备计数自权重准备后跨轮累计，`/clear` 重建会话与 Cache，
+不重置模型设备计数。ForwardBatch 逐 token 调用原有 ForwardToken，每个
+token 都计算、下载一份 logits，单次 D2H 为 `vocab_size * 4` 字节。整批只
+返回最后一份 logits，不保留新增内部前向接口。共享快照计数采用单调用线程约定。
 设备数据流、计数公式与上下文切换约定见
 [设备驻留 CUDA Decode](device_resident_cuda_decode.md)。
 
@@ -103,7 +104,8 @@ generate/bench 的运行摘要累计当前请求的 Prefill + Decode；run 的�
 `generate` 和 `bench` 输出实际解析的配置线程数，例如 `threads: 4`。
 Linear 按输出通道、Matmul 按输出行、CPU Attention 按 query head 复用
 `ParallelFor()`。小任务和单线程配置直接在调用线程执行，因此该输出不等于
-每个算子创建的线程数。Q8_0/Q4_0/Q4_1 Linear 已按 batch 行与输出通道展平并行；
+每个算子实际参与的线程数。达到并行阈值时向常驻工作线程提交任务，嵌套调用
+在当前工作线程串行执行，避免等待自身。Q8_0/Q4_0/Q4_1 Linear 已按 batch 行与输出通道展平并行；
 Q8_0/Q4_0 使用 NEON 或 scalar 点积，Q4_1 使用 scalar 点积。F32 Linear 仍限于
 单向量或 `[1, in]`；量化 Linear 支持 `[batch, in]`，ForwardBatch 仍逐 token 执行。
 
@@ -138,8 +140,13 @@ decode，并更新上下文与请求指标。首个 token 也检查 EOS；最后
 无需计算下一份 logits。原始 ID 和导出文件保留 EOS，展示文本过滤结尾 EOS。
 `--dump-logits` 导出逐位置 F32 logits 和 `generation_tokens.txt`。
 
-`RunBench()` 调用独立的 `RunBenchmark()`，分别统计批量 prefill 和逐 token
-decode。首个生成 token 直接从 prefill logits 采样，因此生成 N 个 token 通常
+`RunBench()` 通过 `MeasureBenchmark()` 重复调用 `debug.h` 已有的 `RunBenchmark()`，
+默认 `--warmup 1 --repeat 3`；预热次数可为零，测量次数必须为正数。每次创建
+独立上下文并从零重放，预热不计入结果。prefill 包括批次构造与前向，decode
+包括后续前向、采样和 verbose 输出，首次采样不计时。报告每次测量的均值及
+prefill + decode 的最小值、中位数、最大值。`debug.cc` 按提供的原始结构实现，
+不保留跨文件的内部测量入口，也不单列 sample/output 时间；`debug.h` 未扩展。
+首个生成 token 直接从 prefill logits 采样，因此生成 N 个 token 通常
 只有 N-1 次 decode。`--verbose` 输出 logits Top-k 和 KV Cache 状态，诊断时可用，
 正式测量吞吐量时应关闭。
 结果同时输出 `tokens/s (total):`、`tokens/s (Decode):`，保留原有
@@ -181,7 +188,47 @@ EOS 计入生成统计但不展示；聊天模式只把非 EOS 的生成 token �
 
 ## 回归验证
 
-2026-10-10 本次同步后重新配置、构建并运行全量 CTest，环境为 Release、
+2026-10-12 在恢复原有 `context.h`、`cuda_runtime.h`、`debug.h`、`cuda_tensor.h`
+接口后重新构建并运行全量 CTest，环境为 Release、GCC 13、CUDA 12.3 /
+Clang 18、RTX 4060 Laptop（CC 8.9）：
+
+| 配置 | 注册 | 实际通过 | 跳过 | 失败 |
+| --- | ---: | ---: | ---: | ---: |
+| CPU，MINI_LLAMA_CUDA=OFF | 236 | 180 | 56 | 0 |
+| CUDA，真实单 GPU，串行执行 | 236 | 228 | 8 | 0 |
+
+CPU 跳过 56 项 CUDA 用例；GPU 跳过 7 项 CPU Stub 用例和 1 项多 GPU 用例。
+本轮覆盖模型对象身份、整批边界预检、逐 token logits 及传输计数、重复测量、线程池复用、
+嵌套与并发任务、算子工作区和句柄复用，以及 Python CLI/报告解析和 NumPy golden。
+调试测试按恢复后的语义验证独立上下文、decode 输出计时与输出流适配恢复。
+没有新增 workspace 模块；CudaTensor 仍使用原有独占 Buffer，不包含通用资源池。
+完整说明与性能历史记录见[五项推理改进与验证](inference_improvements.md)。
+此前恢复原 Tensor 的日志与 JUnit 为 `/tmp/mini-llama-original-tensor-{cpu,cuda}.{log,xml}`。
+恢复提供的 debug.cc 实现、移除新增内部前向入口后重新构建与回归，当前日志/JUnit 为
+`/tmp/mini-llama-original-batch-{cpu,cuda}.{log,xml}`。
+
+### 2026-10-12 全项目检查
+
+此次检查覆盖源码构建注册、模块接口、模型加载与分词、CPU/CUDA 前向与缓存、
+采样与聊天复用、CLI/benchmark、测试脚本和全部 27 份 Markdown 的本地链接。
+37 个源码文件均纳入相应构建，测试源码均有注册；阶段历史数字保留并明确标记。
+
+检查修正了近期改动之外的两处实现问题：CPU valuePtr 对空缓存缺少校验，以及
+ToTensor 在 F32 数据长度错误时静默返回全零。现在 KV 访问检查秩、维度与存储；
+写入先核对两个缓存及输入长度，失败不部分写入。F32 权重转换和对应 Linear
+明确拒绝错误存储。新增 3 个回归用例，全量结果为上表的 236 项。
+
+同步修正 KV 指针的单位置/单头说明、旧线程池描述、线程用例数量及 GGUF
+Tokenizer 测试筛选规则。当前 Tensor 仍公开 shape/data，调用方须保持一致；
+模板仍为 Jinja 子集，CUDA 统计仍按单调用线程约定，未扩展为服务端多请求调度。
+
+本次 CPU/CUDA Release 全量回归日志及 JUnit：
+`/tmp/mini-llama-project-audit-{cpu,cuda}.{log,xml}`。Python 脚本语法、Shell 语法、
+Markdown 本地文件及锚点链接、git diff --check 均通过。
+
+### 2026-10-10 历史回归
+
+2026-10-10 同步后重新配置、构建并运行全量 CTest，环境为 Release、
 GCC 13、CUDA 12.3 / Clang 18、RTX 4060 Laptop（CC 8.9）：
 
 | 配置 | 注册 | 实际通过 | 跳过 | 失败 |
@@ -202,7 +249,7 @@ CUDA Forward 测试覆盖四种 Linear、GQA、两种 RoPE、bias、缓存历史
 
 真实 Qwen2 GGUF 的 inspect、CPU/CUDA 8 步生成 logits 对照、CUDA bench 和
 三轮聊天验证见[设备驻留 Decode 本次同步复验](device_resident_cuda_decode.md#项目链路与文档同步复验)。
-本次构建日志、CTest/JUnit 和真实模型输出保存在 `.cache/project-sync-20261010/`，
+该阶段构建日志、CTest/JUnit 和真实模型输出保存在 `.cache/project-sync-20261010/`，
 缓存不属于提交内容。只验证单 GPU，未运行 compute-sanitizer。
 
 以下为此前 Ops/Quant 阶段记录，保留当时的接入范围，不能作为当前总数。
@@ -252,7 +299,7 @@ python3 scripts/test_threaded_cli.py
 ```
 
 CPU 多线程阶段的回归在模型加载、Tokenizer、生成、聊天、检查命令和基准测试之外，新增
-`tests/threaded_matmul_test.cc` 当时的 9 项多线程测试（现为 14 项），CMake 引用与当前文件名一致。
+`tests/threaded_matmul_test.cc` 当时的 9 项多线程测试（现为 17 项），CMake 引用与当前文件名一致。
 该阶段构建成功，全量 CTest **113/113 通过**，`mini-llama-tests` 前缀
 筛选结果为 **22/22 通过**，这些数字与历史文档中的 82、95、104 项均为阶段快照。
 此前 Backend/CUDA Runtime 阶段记录过 CPU 150 项通过、8 项跳过，CUDA 单 GPU

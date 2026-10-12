@@ -31,3 +31,35 @@ TEST(KvCacheTest, RejectsInvalidInputs) {
   EXPECT_THROW(cache.KeyPtr(0, 0, 1), std::exception);
   EXPECT_THROW(cache.valuePtr(0, -1, 0), std::exception);
 }
+
+// 空缓存、非法维度和截断存储都应报错，不能通过指针接口访问无效内存
+TEST(KvCacheTest, RejectsInvalidCacheStorageBeforePointerAccess) {
+  KvCache empty;
+  EXPECT_THROW(empty.KeyPtr(0, 0, 0), std::runtime_error);
+  EXPECT_THROW(empty.valuePtr(0, 0, 0), std::runtime_error);
+  KvCache cache(1, 2, 1, 2);
+  cache.keys.data.pop_back();
+  cache.values.data.pop_back();
+  EXPECT_THROW(cache.KeyPtr(0, 0, 0), std::runtime_error);
+  EXPECT_THROW(cache.valuePtr(0, 0, 0), std::runtime_error);
+  cache.values.shape = {1, 2};
+  EXPECT_THROW(cache.valuePtr(0, 0, 0), std::runtime_error);
+  cache.keys.shape[3] = -1;
+  EXPECT_THROW(cache.KeyPtr(0, 0, 0), std::runtime_error);
+}
+
+// K/V 输入或缓存形状损坏时，应在复制前报错，避免键已写入而值写入失败
+TEST(KvCacheTest, InvalidWritePreservesBothCaches) {
+  KvCache cache(1, 2, 1, 2);
+  auto good = MakeTensor2D(1, 2, 3.0f);
+  auto truncated = good;
+  truncated.data.pop_back();
+  const auto keys = cache.keys.data;
+  const auto values = cache.values.data;
+  EXPECT_THROW(cache.Write(0, 0, good, truncated), std::runtime_error);
+  EXPECT_THROW(cache.Write(0, 0, truncated, good), std::runtime_error);
+  cache.values.shape = {1, 1, 2, 2};
+  EXPECT_THROW(cache.Write(0, 0, good, good), std::runtime_error);
+  EXPECT_EQ(cache.keys.data, keys);
+  EXPECT_EQ(cache.values.data, values);
+}

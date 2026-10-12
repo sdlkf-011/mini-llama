@@ -18,6 +18,7 @@ struct MiniBatch {
 
   // 从序列构建多 token 批次（预填充步骤）。
   // 位置从 start_pos 开始，每次递增 1。
+  // token 数或连续位置无法由 int 表示时抛出 std::out_of_range
   static MiniBatch FromTokens(const std::vector<int>& toks, int start_pos = 0);
 };
 

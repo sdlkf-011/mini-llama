@@ -4,6 +4,10 @@
 generate/run/bench、CUDA 性能和 counters 验收均为 **NOT_RUN**。
 本地 CPU 结果不能用于推断 CUDA 性能或 speedup。
 
+本地单 GPU 的当前验证与性能见[五项推理改进](inference_improvements.md)。
+本文件的远程状态仍为 NOT_RUN；下方部署口径已同步当前 benchmark，旧本地数字
+保留为阶段记录。
+
 提供的目标环境参考：RTX 4090 D、驱动 590.44.01、Toolkit 12.4.131。
 这些是部署参考，实际报告必须重新采集。历史 `24/24 passed`、Q8_0 `168/168`、
 fallback `0`、H2D `0` 均不是本次测量结果。
@@ -111,7 +115,7 @@ Q4_1 如果存在会单独报告覆盖率。格式不支持、模型缺失/损�
 | Attention | CUDA 调用数=层数×前向 token 数；CPU fallback=0 | NOT_RUN | 累计 counters |
 | GPU KV Cache | 写字节随 token 数线性增加，读字节随历史长度累计；累计读写>0 | NOT_RUN | KV bytes、correctness tests |
 | Decode H2D | 累计 copies=0、bytes=0，从而确认 Decode 无 H2D | NOT_RUN | `cuda_counters.total` |
-| D2H | 每个 prompt/decode 前向下载一次 logits；累计次数/字节与前向工作量一致，无额外下载 | NOT_RUN | copies/bytes、correctness tests |
+| D2H | 每个 prefill/decode token 各下载一份 logits；累计次数/字节符合工作量 | NOT_RUN | copies/bytes、correctness tests |
 | Artifact | MD/JSON/CSV 可读取；默认 CSV 6 行，扩展 8 行；包含 raw logs | NOT_RUN | 同一输出 stem 的三个文件 |
 | CPU/CUDA 对比 | 同组有效 token 数一致，Decode speedup=CUDA/CPU；不限定必须>1 | NOT_RUN | `speedup_decode` |
 <!-- markdownlint-enable MD013 -->
@@ -153,22 +157,24 @@ PY
 ## 性能和 Counter 口径
 
 - `Prefill Time`：prompt 的批次构造与 ForwardBatch wall time。当前 CUDA Prefill 内部仍逐 token
-  前向。
-- `Decode Time`：从第二个生成 token 开始的前向与 CPU 采样循环。
+  前向，每个位置都执行 LM Head 和 logits 下载。
+- `Decode Time`：从第二个生成 token 开始的循环耗时，包括前向、采样和调试输出。
   首个 token 从 prefill logits 采样，计入 Generated，不计入 Decode Tokens。
   正常 `Decode Tokens = max(Generated Tokens - 1, 0)`；上下文上限可能截断预算。
-- `Total Time = Prefill + Decode`，不含模型读取、量化、上传、分词、Context 分配及
-  首次采样。它是两段计算区间之和，不是进程端到端时延。
+- 当前 `Total Time = Prefill + Decode`，首次采样不计时，decode 循环包含后续
+  采样和调试输出；不含模型读取、量化、上传、分词或 Context 分配。
+  它是两段计算区间之和，不是进程端到端时延。
 - `Tokens/s (total) = Generated / Total seconds`；重点指标
   `Tokens/s (Decode) = Decode Tokens / Decode seconds`。无 decode 工作量时实测 CLI
   返回 0；未执行用例则是 JSON `null` / CSV 空单元格，不能用 0 代替。
 - 保留旧 `prefill: ... ms`、`decode:`、throughput 标签，新增 `total: ... ms`。
   解析器也支持 `Prefill/Decode/Total Time (ms)` 和不同大小写；旧日志 total 缺失时
-  由 Prefill+Decode 推导，并记录 `derived_metrics`。
+  由 Prefill+Decode（有 Sample 字段时加上 Sample）推导，并记录 `derived_metrics`。
+  旧版不含 Sample 字段的日志继续按旧口径解析；旧版逐 token prefill 的计数也保留兼容。
 - ForwardBatch 返回主机 logits 前使用同步 D2H 下载，因此计时已包含此前 GPU
   工作完成和必要 logits 回读，不是只测异步 kernel enqueue。
-- 初始化上传后 CLI 调用 `ResetModelCudaRuntimeStats()`，保留上传/权重显存统计，
-  清零模型前向执行统计。基准结束后直接读取原有累计计数，不额外保存阶段快照。
+- 每次基准运行清零模型前向执行统计，保留上传/权重显存统计。
+  最终摘要为最后一次正式测量的计数，不叠加预热与其他重复轮次。
   累计 H2D 为零可证明 Decode 无 H2D；非零累计值无法定位传输发生在哪个阶段，
   需要额外诊断，不能据此声称该传输全部来自 Decode。
 - Counters 统计范围是项目插桩的模型前向，不是 CUPTI/Nsight 或所有 Runtime API
@@ -177,10 +183,10 @@ PY
 - benchmark 总 counters 在 `--quant` 的量化误差对照前向之前输出；误差对照和模型
   量化不计入 Prefill/Decode。实时多线程共享同一模型的其他请求可能污染模型计数，
   正式测试每个用例启动独立进程。
-- 不启用 `--verbose`：它会将解码循环内调试 I/O 计入 Decode 时延。
-- 当前单次进程运行没有 warm-up、重复统计或方差；首次 kernel/JIT/allocator 成本
-  可能影响 Prefill。部署后可多次执行并使用不同输出路径存档，检查波动后再做回归阈值。
-  后续可增加 warm-up、重复轮次/中位数/分位数，保持首次响应与稳态指标分开记录。
+- 正式报告不启用 `--verbose`，decode 循环内的调试输出计入 decode 时间。
+- CLI 默认预热一次、测量三次，支持 `--warmup` / `--repeat`；报告均值和总耗时
+  min/median/max，token 数为每次运行的工作量。每次调用创建独立上下文；脚本
+  保留预热和测量轮次字段，旧版 sample/output 字段仍兼容解析；首次响应可用 `--warmup 0 --repeat 1` 单独测量。
 
 ## 本地可执行验证
 
@@ -224,9 +230,9 @@ python3 scripts/run_cuda_benchmarks.py \
 | chat-q8_0-cpu | 4 / 3 | 1.512 |
 | tiny-q4_0-cpu | 4 / 3 | 1261.371 |
 
-实测完整环境、时延和日志见 [本地验证报告](../artifacts/benchmarks/local-validated.md)、
-[JSON](../artifacts/benchmarks/local-validated.json)、
-[CSV](../artifacts/benchmarks/local-validated.csv)。fast 只有 3 次 Decode，不能作为
+该阶段本地报告使用 `artifacts/benchmarks/local-validated.{md,json,csv}` 路径，
+这些生成产物未随仓库保存；可用上方命令重新生成，当前实测见
+[五项推理改进](inference_improvements.md)。fast 只有 3 次 Decode，不能作为
 稳态性能结论。本次未提供真实 Q4 模型路径，真实 Q4 CPU/CUDA 扩展实测仍为 NOT_RUN。
 
 ## 远程实测回填模板

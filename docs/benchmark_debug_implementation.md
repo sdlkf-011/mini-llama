@@ -42,7 +42,7 @@ Cache 状态的文本输出，不改变普通 `generate` 和交互式 `run` 的�
 
 ### BenchmarkResult
 
-`BenchmarkResult` 保存一次基准运行的计数与耗时：
+公开 `BenchmarkResult` 保持原有结构，保存一次基准运行的计数与阶段耗时：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
@@ -51,6 +51,10 @@ Cache 状态的文本输出，不改变普通 `generate` 和交互式 `run` 的�
 | `n_decode_tokens` | `int` | 实际执行单 token 前向的次数 |
 | `prefill_ms` | `double` | 批量预填充耗时，单位为毫秒 |
 | `decode_ms` | `double` | 逐 token 解码阶段累计耗时，单位为毫秒 |
+
+min/median/max 汇总值由 `main.cc` 的私有测量结构持有，未加入 `debug.h`。
+当前 `debug.cc` 按提供的原始实现恢复，CLI 与库接口均使用 prefill + decode
+计算整体吞吐，不单独报告采样和输出时间。
 
 结构体提供两个吞吐量计算函数：
 
@@ -73,8 +77,10 @@ decode_tokens_per_sec
 | `DumpKvCacheInfo(cache, current_pos)` | 输出层数、最大序列长度、KV 头数、头维度及键值张量 shape |
 
 `DumpLogitsTopK()` 的输入不是一维张量时只输出错误提示。`k <= 0` 或 `k` 大于
-词表大小时会输出整个词表。详细浮点输出临时使用固定六位小数，函数返回前会恢复
-调用方输出流原来的格式状态。
+词表大小时会输出整个词表。详细浮点输出使用固定六位小数，输出后恢复目标流
+原有的格式和精度。三个调试函数也提供显式接收 `std::ostream&` 的重载；
+benchmark 将目标流直接传递给这些函数，不切换全局 `std::cout.rdbuf()`。
+使用独立输出流的并发调用不会互相重定向，`verbose=false` 时不会访问目标流。
 
 ### RunBenchmark
 
@@ -96,9 +102,10 @@ BenchmarkResult RunBenchmark(const MiniLlamaModel& model,
 
 ### 预填充
 
-每次运行创建独立的 `MiniLlamaContext`，因此 KV Cache、位置和 token 历史不会在
-不同基准之间复用。prompt 通过 `MiniBatch::FromTokens(prompt_tokens, 0)` 一次提交，
-`steady_clock` 只测量这次 `ForwardBatch()` 调用。
+每次 `RunBenchmark()` 调用创建独立的 `MiniLlamaContext`；CLI 的预热和重复
+测量调用同一公开接口，不复用上下文分配或计算结果。时间字段为正式测量的
+算术平均，token 数为单次运行的工作量。prompt 从位置零提交，prefill 计时
+覆盖 `MiniBatch::FromTokens()` 和 `ForwardBatch()`。
 
 预填充结束后，最后一个 prompt token 的 logits 直接用于首个生成 token 的采样。
 首 token 不需要额外前向，因此它会计入 `n_generated_tokens`，但不会计入
@@ -127,9 +134,8 @@ n_decode_tokens    = max(N - 1, 0)
 4. 每个生成 token ID，以及后续解码步骤的 logits Top-5。
 5. 运行结束时的 KV Cache 信息。
 
-详细输出用于定位状态，不用于获得稳定性能数字。预填充调试输出位于预填充计时
-之外，但解码循环中的 token 与 Top-k 输出位于 `decode_ms` 的计时区间内，启用
-`--verbose` 会降低测得的解码吞吐量。
+decode 循环内的采样与详细输出计入 `decode_ms`；prefill 前后的调试和首次
+采样不计时。性能比较应关闭 verbose，整体时间为 prefill_ms + decode_ms。
 
 ## CLI 接入
 
@@ -155,6 +161,8 @@ n_decode_tokens    = max(N - 1, 0)
 | `--quant q8_0\|q4_0` | 保留模型格式 | 重量化所有 Linear，输出相对模型原始格式的 logits 误差 |
 | `--seed <n>` | `0` | 设置采样器种子 |
 | `--verbose` | 关闭 | 输出 logits 和 KV Cache 调试信息 |
+| `--warmup <n>` | `1` | 不计入结果的预热次数，允许零 |
+| `--repeat <n>` | `3` | 正式测量次数，必须为正数 |
 
 `bench` 复用 `generate` 的模型路径解析、模型加载、Tokenizer 选择和特殊 token
 校验，但不接受 `--temperature`、`--top-k` 或 `--dump-logits`。当前基准运行器使用
@@ -166,6 +174,12 @@ CUDA 模式自动上传权重，基准阶段执行完整设备前向和 CPU 采�
 报告最大/平均绝对误差；两次误差对照前向不计入 prefill/decode 性能区间。
 原始格式可能已经量化，不等于全 F32 参考。运行摘要在误差计算前输出，
 只包含基准实际工作量。权重大小为数据字节，不包括 KV Cache 和临时激活。
+CUDA 执行计数在每次重放前清零，摘要代表最后一次正式测量。原有库调用重载
+仍执行一次、不预热；CLI 在实现层组织预热和重复运行，不增加公开重载或类型。
+benchmark trace 的阶段时间为单次均值，
+请求总耗时包括加载、预热、全部测量和输出，两者不能直接相加对齐。
+输出的 `weight compression ratio (f32/actual)` 为 F32 等价权重字节数除以实际
+权重字节数；`1x` 表示相同大小，大于 `1x` 表示压缩，不计入 CPU/GPU 双份存储。
 
 ### 运行性能基准
 
@@ -258,7 +272,12 @@ CLI 异常处理，输出 `status=error` 的请求摘要。
 
 ## 测试覆盖
 
-`tests/debug_test.cc` 包含 8 项单元测试：
+阶段完成时 `tests/debug_test.cc` 包含 8 项单元测试，当前还覆盖：
+
+- 输出期间不修改全局 `std::cout`，并保留目标流的格式和精度。
+- 多个 benchmark 在独立输出流上并行运行，详细和静默输出互不干扰。
+
+原有覆盖包括：
 
 - 两种吞吐量公式及零耗时保护。
 - 张量 shape 元数据输出。
@@ -269,7 +288,7 @@ CLI 异常处理，输出 `status=error` 的请求摘要。
 - 最大上下文长度截断。
 - verbose 模式的完整调试信息。
 
-`tests/main_test.cc` 另有 1 项 CLI 集成测试，覆盖 `bench --help`、资源装配、
+该阶段 `tests/main_test.cc` 另有 1 项 benchmark CLI 集成测试，覆盖 `bench --help`、资源装配、
 `--verbose` 输出流、统计结果和 `mode=bench` 请求追踪。
 
 本阶段验证命令：
@@ -296,12 +315,11 @@ CPU 多线程阶段的历史完整回归为 113/113，`mini-llama-tests` 前缀�
   `ForwardBatch()` 拒绝。CLI 会通过 `EncodePrompt()` 为合法空文本补入 BOS。
 - 基准路径不识别 EOS，也不解码生成文本；它按预算或上下文上限完成固定工作量。
 - 当前只使用贪心采样，`seed` 不影响结果；随机采样性能不属于本阶段范围。
-- 当前没有 warm-up、重复轮次、均值、分位数或方差统计，单次结果容易受系统负载
-  和首次运行开销影响。
+- CLI 支持预热、重复测量、均值及 min/median/max；尚不报告方差或任意分位数。
 - `prefill_ms` 与 `decode_ms` 不包含模型加载和 prompt 编码；这些阶段单独记录在
   `RequestContext` 中。
-- `decode_ms` 覆盖逐 token 前向、采样以及 verbose 模式下的循环内输出，因此
-  性能比较必须关闭 `--verbose`。
+- `decode_ms` 覆盖逐 token 前向、后续采样和 verbose 输出，首次采样不计时。性能比较
+  推荐关闭 `--verbose`，使用预热和重复测量。
 - CLI 已有 `--backend cpu|cuda`、`--device`、`--threads` 和 `--quant`；CUDA
   benchmark 已连接完整设备前向。CPU F32 Linear 使用 SIMD/线程分发，Attention 按 head 并行；
   三种量化 Linear 支持 batch 与外层并行，Q8_0/Q4_0 可使用 NEON，Q4_1 点积

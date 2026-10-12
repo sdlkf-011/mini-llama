@@ -5,6 +5,10 @@
 > CLI CUDA 推理均已接入，快照不完整时报错。当前链路与验收见
 > [设备驻留 CUDA Decode](device_resident_cuda_decode.md)和
 > [CLI 同步说明](cli_integration_status.md)。
+>
+> 后续实现已在 `cuda_matmul.cc` 内按线程、设备复用 cuBLAS 句柄，batch 仍逐
+> token 计算 logits；下文逐次创建句柄指历史阶段，当前行为见
+> [五项推理改进](inference_improvements.md)。
 
 本阶段补齐已有 CUDA Linear 草稿的公共接口，复用 `Tensor`、`CudaTensor`、
 `CudaDeviceBuffer`、设备选择、模型上传快照与运行统计。CPU 构建有明确的异常

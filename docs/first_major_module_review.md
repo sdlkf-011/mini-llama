@@ -239,8 +239,10 @@ ForwardBatch  管理一组 token 的位置、历史，并返回最后一个 toke
 ForwardToken  对当前位置的单个 token 执行完整 Transformer 前向
 ```
 
-`ForwardBatch()` 在每一步先设置 `ctx.pos`，再调用 `ForwardToken()`，最后把该 token 追加到
-`ctx.token_history`。这样 prefill 和 decode 可以复用同一条计算路径：
+`ForwardBatch()` 先检查模型对象身份及整批 token/position 范围，再逐步设置
+`ctx.pos`，调用原有 `ForwardToken()` 执行完整前向与 KV 写入，并把 token
+追加到 `ctx.token_history`。每步都计算 logits，批次返回最后一份，没有新增
+跨文件内部接口。这样 prefill 和 decode 可以复用同一条计算路径：
 
 ```text
 Prefill = ForwardBatch(多个 prompt token)

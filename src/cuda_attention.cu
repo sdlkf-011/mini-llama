@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -15,6 +16,21 @@
 namespace mini_llama {
 
 namespace {
+
+// 默认 stream 保证分数读写顺序；按线程和设备保留一个可增长的工作缓冲区
+CudaDeviceBuffer& AttentionScoreBuffer(size_t bytes, int device_id) {
+  thread_local std::map<int, CudaDeviceBuffer> buffers;
+  auto& buffer = buffers[device_id];
+  if (buffer.bytes() < bytes) {
+    size_t capacity = bytes;
+    if (bytes <= 64 * 1024 * 1024) {
+      capacity = 1;
+      while (capacity < bytes) capacity *= 2;
+    }
+    buffer.Reset(capacity, device_id);
+  }
+  return buffer;
+}
 
 constexpr int kAttentionBlockSize = 128;
 
@@ -213,11 +229,17 @@ CudaTensor CudaAttentionDecodeDeviceInput(const CudaTensor& q,
                  "output elements");
   const size_t score_elements = CheckedMul(
       static_cast<size_t>(n_heads), static_cast<size_t>(pos + 1), "score elements");
-  const size_t score_bytes =
-      CheckedMul(score_elements, sizeof(float), "score bytes");
 
   // 分数临时存储始终位于设备，输出保持一维以衔接现有 Linear 接口
-  CudaDeviceBuffer scores_dev(score_bytes, device_id);
+  const size_t score_bytes =
+      CheckedMul(score_elements, sizeof(float), "score bytes");
+  CudaDeviceBuffer transient_scores;
+  if (score_bytes > 64 * 1024 * 1024) {
+    transient_scores.Reset(score_bytes, device_id);
+  }
+  auto& scores_dev = transient_scores.empty()
+                         ? AttentionScoreBuffer(score_bytes, device_id)
+                         : transient_scores;
   CudaTensor out({static_cast<int>(out_elements)}, device_id);
 
   float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));

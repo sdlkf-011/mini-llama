@@ -16,7 +16,7 @@ class Terminal {
   Terminal();
   Terminal(std::istream& input, std::ostream& output);
 
-  // 打印用户提示符并立即刷新
+  // 流输入立即打印提示符；交互终端在 ReadLine 中由行编辑器显示和重绘
   void PrintUserPrompt() const;
 
   // 从输入流读取一行；遇到 EOF 时返回空字符串
@@ -50,8 +50,10 @@ class Terminal {
   void PrintMessage(const std::string& msg) const;
 
  private:
+  bool UsesLineEditor() const;
   std::istream* input_;
   std::ostream* output_;
+  mutable bool prompt_pending_ = false;
 };
 
 }  // namespace mini_llama

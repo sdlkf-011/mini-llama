@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.17)
 
 # 项目配置
 project(mini_llama LANGUAGES CXX)
+find_package(Threads REQUIRED)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,6 +68,38 @@ target_include_directories(mini_llama_core
   PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
+target_link_libraries(mini_llama_core PUBLIC Threads::Threads)
+
+# 可选 POSIX 行编辑器；非交互输入不使用 libedit
+set(MINI_LLAMA_LIBEDIT "AUTO" CACHE STRING "Use libedit for interactive input: AUTO, ON, or OFF")
+set_property(CACHE MINI_LLAMA_LIBEDIT PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${MINI_LLAMA_LIBEDIT}" mini_llama_libedit_mode)
+if(NOT mini_llama_libedit_mode MATCHES "^(AUTO|ON|OFF)$")
+  message(FATAL_ERROR "MINI_LLAMA_LIBEDIT must be AUTO, ON, or OFF")
+endif()
+
+set(MINI_LLAMA_HAS_LIBEDIT OFF)
+if(UNIX AND NOT mini_llama_libedit_mode STREQUAL "OFF")
+  find_path(LIBEDIT_INCLUDE_DIR NAMES histedit.h)
+  find_library(LIBEDIT_LIBRARY NAMES edit)
+  if(LIBEDIT_INCLUDE_DIR AND LIBEDIT_LIBRARY)
+    set(MINI_LLAMA_HAS_LIBEDIT ON)
+    target_include_directories(mini_llama_core PRIVATE ${LIBEDIT_INCLUDE_DIR})
+    target_link_libraries(mini_llama_core PRIVATE ${LIBEDIT_LIBRARY})
+    target_compile_definitions(mini_llama_core PRIVATE MINI_LLAMA_USE_LIBEDIT=1)
+  elseif(mini_llama_libedit_mode STREQUAL "ON")
+    message(FATAL_ERROR "libedit development files are required (Ubuntu/Debian: apt install libedit-dev)")
+  else()
+    message(WARNING "libedit was not found; using std::getline. UTF-8 terminal line editing is disabled (Ubuntu/Debian: apt install libedit-dev).")
+  endif()
+elseif(mini_llama_libedit_mode STREQUAL "ON")
+  message(FATAL_ERROR "MINI_LLAMA_LIBEDIT=ON requires a POSIX platform")
+endif()
+if(MINI_LLAMA_HAS_LIBEDIT)
+  message(STATUS "Interactive line editing: libedit")
+else()
+  message(STATUS "Interactive input: std::getline (UTF-8 terminal line editing disabled)")
+endif()
 
 # 命令行程序复用 src/main.cc；宏只在该目标中启用全局 main()
 add_executable(mini-llama
@@ -89,10 +122,18 @@ include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  if(MINI_LLAMA_HAS_LIBEDIT)
+    add_test(NAME terminal-input
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/test_terminal_input.py
+              --binary $<TARGET_FILE:mini-llama>
+              --model ${CMAKE_SOURCE_DIR}/models/tiny)
+    set_tests_properties(terminal-input PROPERTIES TIMEOUT 30)
+  endif()
   add_test(
     NAME backend-cli-smoke
     COMMAND ${CMAKE_COMMAND} -E env
             "MINI_LLAMA_BIN=$<TARGET_FILE:mini-llama>"
+            "PYTHONDONTWRITEBYTECODE=1"
             ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/scripts/test_backend_cli.py
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

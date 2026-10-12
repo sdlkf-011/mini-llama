@@ -156,7 +156,7 @@ Linear 算子，没有改变前向推理、KV Cache 或 token 的执行顺序。
 
 ## 测试覆盖与验证结果
 
-`tests/threaded_matmul_test.cc` 现有 14 项测试，保留原有线程调度、F32、Attention
+`tests/threaded_matmul_test.cc` 现有 17 项测试，保留原有线程调度、F32、Attention
 测试，并补充量化路径。每个用例都有目的说明，重点覆盖：
 
 - F32 的 naive、threaded、SIMD、threaded-SIMD 对照；长度 8 覆盖整块，9/10/7

@@ -3,7 +3,10 @@
 
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <limits>
+#include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -397,6 +400,64 @@ TEST_F(ThreadedMatmulTest, CallbackExceptionsPropagateAfterAllWorkersFinish) {
   }
   EXPECT_THROW(ParallelFor(1, [](int, int) { throw std::runtime_error("small"); }),
                std::runtime_error);
+  std::atomic<int> recovered{0};
+  ParallelFor(67, [&](int begin, int end) { recovered += end - begin; });
+  EXPECT_EQ(recovered.load(), 67);
+}
+
+// 两次调用使用相同常驻线程；屏障保证各块确实由独立工作线程执行。
+TEST_F(ThreadedMatmulTest, RepeatedWorkReusesWorkerThreads) {
+  SetThreadCount(4);
+  const auto collect = [] {
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::set<std::thread::id> ids;
+    ParallelFor(64, [&](int, int) {
+      std::unique_lock<std::mutex> lock(mutex);
+      ids.insert(std::this_thread::get_id());
+      ready.notify_all();
+      ready.wait(lock, [&] { return ids.size() == 4; });
+    });
+    return ids;
+  };
+  const auto initial = collect();
+  EXPECT_EQ(initial.size(), 4u);
+  EXPECT_EQ(collect(), initial);
+}
+
+// 工作线程嵌套提交立即串行执行，不等待同一池；每个任务仍恰好执行一次。
+TEST_F(ThreadedMatmulTest, NestedParallelForCompletesWithoutDeadlock) {
+  SetThreadCount(4);
+  std::atomic<int> completed{0};
+  ParallelFor(64, [&](int, int) {
+    const auto worker = std::this_thread::get_id();
+    ParallelFor(128, [&](int begin, int end) {
+      EXPECT_EQ(std::this_thread::get_id(), worker);
+      completed += end - begin;
+    });
+  });
+  EXPECT_EQ(completed.load(), 512);
+}
+
+// 多个调用方共享工作线程，每批任务有独立完成计数和异常槽。
+TEST_F(ThreadedMatmulTest, ConcurrentCallersKeepTheirTasksIndependent) {
+  SetThreadCount(4);
+  std::vector<int> first(131, 0), second(97, 0);
+  std::thread caller([&] {
+    for (int iteration = 0; iteration < 20; ++iteration) {
+      ParallelFor(131, [&](int begin, int end) {
+        for (int i = begin; i < end; ++i) ++first[i];
+      });
+    }
+  });
+  for (int iteration = 0; iteration < 20; ++iteration) {
+    ParallelFor(97, [&](int begin, int end) {
+      for (int i = begin; i < end; ++i) ++second[i];
+    });
+  }
+  caller.join();
+  for (int count : first) EXPECT_EQ(count, 20);
+  for (int count : second) EXPECT_EQ(count, 20);
 }
 
 // 小 head 数覆盖退化路径；68 个 head 在 4 线程下真正并行，且共享 GQA KV 头。

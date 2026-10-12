@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -47,6 +49,16 @@ TEST(BatchTest, FromEmptyTokensProducesEmptyBatch) {
   EXPECT_EQ(batch.num_tokens(), 0);
   EXPECT_TRUE(batch.tokens.empty());
   EXPECT_TRUE(batch.positions.empty());
+}
+
+// 整数上限仍是合法编号，只有连续位置真正溢出时拒绝，空批次不做加法。
+TEST(BatchTest, FromTokensRejectsPositionOverflow) {
+  const int last = std::numeric_limits<int>::max();
+  EXPECT_EQ(MiniBatch::FromTokens({4}, last).positions, std::vector<int>({last}));
+  EXPECT_EQ(MiniBatch::FromTokens({4, 5}, last - 1).positions,
+            std::vector<int>({last - 1, last}));
+  EXPECT_THROW(MiniBatch::FromTokens({4, 5}, last), std::out_of_range);
+  EXPECT_TRUE(MiniBatch::FromTokens({}, last).positions.empty());
 }
 
 }  // namespace

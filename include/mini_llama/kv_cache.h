@@ -20,9 +20,9 @@ struct KvCache {
   // v: [KV 头数, 头维度]
   void Write(int layer, int pos, const Tensor& k, const Tensor& v);
 
-  // 获取某一层中截至某个位置（包含该位置）的键的视图
-  // 返回 keys[layer, 0..pos, :, :] 作为扁平向量引用
-  // 调用者已知形状为 [pos+1, KV 头数, 头维度]
+  // 借用指定层、位置、KV 头的键或值，连续可读范围为 head_dim 个元素
+  // 遍历历史时由调用方逐位置查询；返回指针不拥有数据，缓存存储变化后不可继续使用
+  // 拒绝无效缓存形状、存储大小和越界索引
   const float* KeyPtr(int layer, int pos, int kv_head) const;
   const float* valuePtr(int layer, int pos, int kv_head) const;
 };

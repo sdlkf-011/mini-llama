@@ -1,9 +1,13 @@
 # CUDA 正确性审计与验证指南
 
-本次验证日期：2026-10-11。本阶段仅执行 `MINI_LLAMA_CUDA=OFF` 的本地构建、
+下文的阶段验证日期为 2026-10-11。当时仅执行 `MINI_LLAMA_CUDA=OFF` 的本地构建、
 CPU/Stub 测试和脚本跳过路径；没有连接远程服务器、运行 CUDA 二进制或执行
-GPU 计算。下列 GPU 项目统一为 **NOT RUN / PENDING GPU VALIDATION**。
-其他文档中的历史 GPU 结果不代表本次修改已通过 GPU 验证。
+GPU 计算；该阶段表格中的 GPU 状态保留为 **NOT RUN / PENDING GPU VALIDATION**。
+
+2026-10-12 当前工作区已在真实单 GPU 上完成 Release 全量回归：236 项注册，
+228 实际通过、8 跳过、0 失败；CPU 为 180 通过、56 跳过、0 失败。
+当前结果见[CLI 同步说明](cli_integration_status.md#回归验证)，阶段表格不代表
+当前整体状态。后端计数口径在本文中按当前实现更新，远程服务器部署仍未执行。
 
 ## 审计结果与最小补充
 
@@ -75,17 +79,18 @@ CPU 路径仍独立可用；显式选择不可用 CUDA 时返回失败，不静�
 - 初始化/上传：`uploaded weights` 与 `gpu memory used` 表示成功上传的静态权重数/字节；后者不是进程总显存，也不包括 KV 与临时激活。
 - Forward 计数：成功算子调用后记录 Linear、activation、Attention；`cpu attention fallback calls` 独立记录 CPU Attention 路径。
 - 传输：模型 Forward 的 H2D/D2H 次数和字节；权重上传、设备 memset、显式测试 KV 回读不计入该范围。它们不是全局 CUDA profiler。
-- CLI generate/bench：`CUDA runtime (prefill + decode)` 明确累计当前请求；RunMain 在上传后清零。聊天 run 沿用跨轮累计口径，`/clear` 重建上下文但不清零模型统计。
+- CLI generate：`CUDA runtime (prefill + decode)` 累计当前请求；bench 为最后一次正式测量的计数，不叠加预热和其他轮次。聊天 run 沿用跨轮累计口径，`/clear` 重建上下文但不清零模型统计。
 - Prefill 与 Decode：trace 分别记录输入位置数及耗时；F32 常驻测试在 Prefill 后清零并独立检查 Decode。没有将累计 CLI 指标冒充 Decode 独立指标。
 
-设 `L` 为层数、`T = prefill_tokens + decode_tokens` 为成功 Forward 次数：
+设 `L` 为层数、`T = prefill_tokens + decode_tokens` 为处理 token 数：
 Linear 为 `(7L+1)T`、Attention 为 `LT`、完整 GPU 路径的 CPU Attention fallback 为 0。
 热路径 H2D 次数/字节为 0；D2H 为 `T` 次、`T * vocab_size * sizeof(float)` 字节。
-CPU Sampler 需要每份最终 logits；不能断言完整生成只有一次 D2H。
-当前 Prefill 逐 token 计算，每个输入位置也下载 logits。
+ForwardBatch 逐 token 调用原有 ForwardToken，每个位置都计算并下载 logits，
+整批返回最后一份；逐步 dump 也使用相同前向接口。
 KV 写入为 `2L * n_kv_heads * head_dim * sizeof(float) * T`；读取按查询头的
 逻辑访问计数，GQA 会重复计算共享 KV 访问，不等于物理显存带宽。
-Kernel/调用计数证明实际分流和成功 API 调用，未引入 CUPTI 或性能优化。
+Kernel/调用计数证明实际分流和成功 API 调用，未引入 CUPTI。
+最新全量验证与工作区复用见[五项推理改进](inference_improvements.md)。
 
 ## 本次本地验证
 
@@ -166,7 +171,7 @@ MINI_LLAMA_BIN=./build-cuda/mini-llama python3 scripts/test_cuda_chat_smoke.py
 ```
 
 Toolkit 在非标准位置时使用 `CUDAToolkit_ROOT`；需要时明确选择 CUDA 编译器、
-主机编译器与目标 GPU 架构，详见 [README 构建说明](../README.md#构建与使用)。
+主机编译器与目标 GPU 架构，详见 [README 构建说明](../README.md#构建与测试)。
 使用新的 build-cuda 缓存，避免继承另一台机器的 SDK/编译器路径。
 
 GPU smoke 用 `--dump-logits` 增加逐位置数值/有限值检查；CPU 只算相同 prompt 的

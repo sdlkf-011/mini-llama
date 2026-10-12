@@ -7,6 +7,7 @@ CUDA Runtime and CUDA inference integration are checked separately.
 """
 
 import math
+import csv
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+from run_cuda_benchmarks import parse_benchmark_stdout, write_csv
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +31,40 @@ def invoke(*args, text="", env=None):
         environment.update(env)
     return subprocess.run([str(BIN), *map(str, args)], cwd=ROOT, input=text,
                           capture_output=True, text=True, timeout=30, env=environment)
+
+
+class BenchmarkReportTest(unittest.TestCase):
+    LEGACY = ("prompt tokens: 2\ngenerated tokens: 2\ndecode tokens: 1\n"
+              "prefill: 2.000 ms\ndecode: 2.000 ms\ntotal: 4.000 ms\n"
+              "throughput: 500.000 tokens/s\ndecode throughput: 500.000 tokens/s\n")
+
+    def test_legacy_benchmark_timing_is_still_supported(self):
+        parsed = parse_benchmark_stdout(self.LEGACY)
+        self.assertEqual(parsed["metrics"]["total_ms"], 4)
+        self.assertNotIn("sample_ms", parsed["metrics"])
+
+    def test_sampling_must_be_included_in_total_time(self):
+        with self.assertRaisesRegex(ValueError, "forward \\+ sample"):
+            parse_benchmark_stdout(self.LEGACY + "sample: 1.000 ms\n")
+
+    def test_current_benchmark_fields_round_trip_through_csv(self):
+        result = invoke("bench", MODEL, "--backend", "cpu", "--threads", "1",
+                        "--warmup", "0", "--repeat", "1", "-n", "2")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        parsed = parse_benchmark_stdout(result.stdout)
+        self.assertEqual(parsed["metrics"]["warmup_runs"], 0)
+        self.assertEqual(parsed["metrics"]["measured_runs"], 1)
+        case = dict(parsed, name="tiny-cpu", status="PASSED")
+        report = dict(benchmarks=[case], config=dict(prompt="hello", n_predict=2,
+                                                   seed=0, threads=1))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "benchmark.csv"
+            write_csv(path, report)
+            with path.open() as source:
+                rows = list(csv.DictReader(source))
+            self.assertEqual(rows[0]["measured_runs"], "1")
+            self.assertEqual(rows[0]["sample_ms"], "")
+            self.assertEqual(rows[0]["output_ms"], "")
 
 
 class BackendCliTest(unittest.TestCase):
@@ -226,12 +263,13 @@ class BackendCliTest(unittest.TestCase):
                                        result.stdout).group(1))
                   for label in ("cuda Linear calls", "cuda activation calls",
                                 "cuda attention calls", "cpu attention fallback calls")}
-        self.assertEqual(fields["cuda Linear calls"], forwards * 15)
-        self.assertEqual(fields["cuda activation calls"], forwards * 15)
+        logits = forwards
+        self.assertEqual(fields["cuda Linear calls"], forwards * 14 + logits)
+        self.assertEqual(fields["cuda activation calls"], forwards * 14 + logits)
         self.assertEqual(fields["cuda attention calls"], forwards * 2)
         self.assertEqual(fields["cpu attention fallback calls"], 0)
         self.assertIn("host->device copies: 0 (0 bytes)", result.stdout)
-        self.assertIn(f"device->host copies: {forwards} ({forwards * 512} bytes)",
+        self.assertIn(f"device->host copies: {logits} ({logits * 512} bytes)",
                       result.stdout)
 
     def test_cuda_generate_logits_match_cpu(self):
