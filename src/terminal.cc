@@ -1,9 +1,5 @@
 #include "mini_llama/terminal.h"
 
-#include <algorithm>
-#include <cerrno>
-#include <climits>
-#include <cwchar>
 #include <iomanip>
 #include <iostream>
 #include <istream>
@@ -22,7 +18,14 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <termios.h>
+#include <wchar.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cwchar>
 #endif
 #endif
 
@@ -30,6 +33,7 @@
 #include <histedit.h>
 
 #include <cstdio>
+#include <memory>
 #endif
 
 #include "mini_llama/chat.h"
