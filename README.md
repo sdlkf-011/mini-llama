@@ -18,12 +18,13 @@ Ubuntu/Debian 可先安装 CPU 构建和测试依赖：
 
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential cmake git python3 libgtest-dev libedit-dev
+sudo apt-get install build-essential cmake git python3 libgtest-dev
 cmake --version
 ```
 
 若发行版提供的 CMake 版本较旧，请先升级 CMake。其他系统请使用相应包管理器
-安装编译器、CMake 和 Python 3；libedit 为可选依赖。
+安装编译器、CMake 和 Python 3。可选的 libedit 安装与配置见
+[终端行编辑](#终端行编辑)。
 
 ```bash
 git clone https://github.com/sdlkf-011/mini-llama.git
@@ -40,57 +41,47 @@ cmake --build build -j4
 
 ## 构建与测试
 
-项目通过 CMake 构建 `mini_llama_core` 核心库、`mini-llama` 可执行程序和各模块测试。
+CMake 构建 `mini_llama_core` 核心库和 `mini-llama` 程序，默认同时构建测试。
+以下命令均在仓库根目录执行。CPU 和 CUDA 分别使用 `build/`、`build-cuda/`，
+运行和测试时请使用对应目录中的程序。配置选项保存在各自的 CMake 缓存中；
+修改选项后，需要重新编译才能更新可执行程序。
+
+### 配置项与依赖
 
 | 配置项 | 默认值 | 作用 |
 | --- | --- | --- |
-| `MINI_LLAMA_CUDA` | `OFF` | 编译 CUDA 包装、kernel 并链接 CUDA Runtime/cuBLAS |
-| `MINI_LLAMA_LIBEDIT` | `AUTO` | 自动检测可选的 libedit 行编辑器；`ON` 要求可用，`OFF` 禁用 |
-| `BUILD_TESTING` | `ON` | 构建 GoogleTest 测试并注册 CTest/Python 回归 |
-| `CMAKE_CUDA_ARCHITECTURES` | 由构建环境决定 | 指定目标 GPU 架构，使用此选项需 CMake 3.18 或更新版本 |
+| `MINI_LLAMA_CUDA` | `OFF` | 启用 CUDA 后端，编译 kernel 并链接 CUDA Runtime/cuBLAS |
+| `BUILD_TESTING` | `ON` | 构建 GoogleTest 测试，并注册 CTest/Python 回归 |
+| `MINI_LLAMA_LIBEDIT` | `AUTO` | 选择交互行编辑器，支持 `AUTO`、`ON`、`OFF` |
+| `CMAKE_CUDA_ARCHITECTURES` | 由工具链决定 | CUDA 目标架构；下文使用 `native`，需要 CMake 3.24 或更新版本 |
 
-启用测试需要 GoogleTest 和 Python 3。CMake 优先查找系统中的 GoogleTest，找不到时
-通过 FetchContent 获取 v1.15.2。NumPy 用于 golden logits 回归，缺少时该项明确跳过。
-可选安装 NumPy，例如 Ubuntu/Debian 的 `python3-numpy` 包，以运行数值参考测试。
+基础构建需要支持 C++17 的编译器和 CMake。默认启用测试，还需要 Python 3 和
+GoogleTest。CMake 优先查找系统中的 GoogleTest；未找到时联网下载 v1.15.2。
+离线构建测试时，可在配置命令中添加
+`-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=/已有的/googletest/源码目录` 复用本地源码。
 
-libedit 是 Linux/macOS 交互聊天的可选依赖，用于 UTF-8 中文退格、光标移动和
-跨行重绘。默认 `AUTO` 在找到开发文件时启用；缺少时给出配置警告，仍可正常
-构建，交互输入回退到 `std::getline`，中文退格的显示问题仍可能出现。
-Ubuntu/Debian 可运行 `sudo apt-get install libedit-dev` 安装开发文件。
-`-DMINI_LLAMA_LIBEDIT=ON` 要求 libedit 可用，缺少依赖或平台不支持时配置失败；
-`-DMINI_LLAMA_LIBEDIT=OFF` 完全禁用其查找和链接。
+### CPU 构建
 
-启用行编辑器时终端需设置有效的 `TERM` 和 UTF-8 locale（如 `LANG=C.UTF-8`）。
-管道和重定向输入不使用行编辑器。
-
-### CPU
-
-快速开始中的构建无需 CUDA Toolkit，默认包含测试。构建后运行：
+CPU 构建无需 CUDA Toolkit：
 
 ```bash
-ctest --test-dir build --output-on-failure -j4
+cmake -S . -B build -DMINI_LLAMA_CUDA=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j4
+./build/mini-llama generate --model models/tiny -p hello -n 8
 ```
 
-如果只需推理程序，可使用独立目录关闭测试构建，此时不需要 GoogleTest 或 Python：
+如果只需推理程序，在配置命令中追加 `-DBUILD_TESTING=OFF`，此时不需要
+GoogleTest 或 Python，也不会下载测试依赖。以后需要运行测试时，将其改回
+`-DBUILD_TESTING=ON`，重新配置并编译。
 
-```bash
-cmake -S . -B build-cpu -DMINI_LLAMA_CUDA=OFF -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build-cpu -j4
-./build-cpu/mini-llama generate --model models/tiny -p hello -n 8
-```
+### CUDA 构建
 
-### CUDA
+CUDA 构建需要完整的 CUDA Toolkit，包括 CUDA 编译器、头文件、libdevice、
+Runtime 和 cuBLAS；运行时还需要可访问的 NVIDIA GPU 和兼容驱动。
+先用 `nvidia-smi` 检查设备；使用 `nvcc` 时，再用 `nvcc --version` 检查编译器。
+仅能运行 `nvidia-smi` 不代表已安装 Toolkit。
 
-需要 NVIDIA GPU、兼容驱动和完整 CUDA Toolkit，包括 CUDA 编译器、头文件、
-libdevice、Runtime 和 cuBLAS。下面使用 Toolkit 自带的 `nvcc`，请先确认其在
-`PATH` 中，并且驱动可以访问 GPU：
-
-```bash
-nvidia-smi
-nvcc --version
-```
-
-在将要运行程序的 GPU 机器上构建：
+在配置时能够访问 GPU 的环境中，使用自动架构探测：
 
 ```bash
 cmake -S . -B build-cuda -DMINI_LLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
@@ -98,23 +89,104 @@ cmake -S . -B build-cuda -DMINI_LLAMA_CUDA=ON -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-cuda -j4
 ./build-cuda/mini-llama --cuda-info
 ./build-cuda/mini-llama generate --model models/tiny --backend cuda -p hello -n 8
+```
+
+`native` 需要在配置阶段运行 GPU 探测程序。无 GPU、设备访问受限或为其他 GPU
+构建时，应显式指定目标架构，例如用 `-DCMAKE_CUDA_ARCHITECTURES=89` 为计算能力
+8.9 的 GPU 构建。所选架构必须受 Toolkit 和 CUDA 编译器支持。
+CUDA 构建的程序默认仍使用 CPU，推理时需添加 `--backend cuda` 才会使用 GPU。
+
+Toolkit 安装在非标准位置时，可在当前终端设置路径，再执行上面的配置命令：
+
+```bash
+export CUDAToolkit_ROOT=/实际的/cuda/安装目录
+export PATH="$CUDAToolkit_ROOT/bin:$PATH"
+```
+
+CMake 可使用 `nvcc` 或兼容的 Clang。首次配置可通过 `CUDACXX` 环境变量选择
+CUDA 编译器，例如 `export CUDACXX=/usr/bin/clang++-18`；也可在配置命令中显式添加
+`-DCMAKE_CUDA_COMPILER=/实际的/编译器路径`。路径和版本须与实际安装的 Toolkit
+匹配。使用 `nvcc` 时，其主机编译器也须受 Toolkit 支持，可通过
+`-DCMAKE_CUDA_HOST_COMPILER=/兼容的/g++路径` 指定。
+
+已有构建目录会优先沿用缓存中的编译器，修改 `PATH` 或 `CUDACXX` 不会自动切换
+工具链。更换编译器时使用新构建目录，或在完整的配置命令中添加 `--fresh`
+刷新缓存；重新提供原先需要保留的配置选项。
+
+### 终端行编辑
+
+libedit 是 Linux/macOS 的可选依赖，Ubuntu/Debian 可通过
+`sudo apt-get install libedit-dev` 安装。
+
+| `MINI_LLAMA_LIBEDIT` | 交互输入行为 |
+| --- | --- |
+| `AUTO` | 找到 libedit 时启用；缺少时给出配置警告，使用内置 UTF-8 编辑器 |
+| `ON` | 要求使用 libedit；缺少开发文件或平台不支持时配置失败 |
+| `OFF` | 禁用 libedit 的查找和链接；Linux/macOS 使用内置 UTF-8 编辑器 |
+
+内置编辑器支持常见中文的退格、左右移动、Home/End、Delete 和跨行重绘，
+无需新增依赖。验证缺少 libedit 时的行为，可临时禁用它并重新编译：
+
+```bash
+cmake -S . -B build -DMINI_LLAMA_LIBEDIT=OFF
+cmake --build build -j4
+```
+
+随后正常启动交互聊天即可测试。恢复自动检测时，把上面的 `OFF` 改为 `AUTO`，
+再次配置并编译。测试 CUDA 程序时，将这两条命令的目录换成 `build-cuda`。
+
+行编辑需要支持 UTF-8 的交互终端和有效的 `TERM`，建议使用 UTF-8 locale
+（如 `LANG=C.UTF-8`）。管道、重定向输入及不支持行编辑的终端使用 `std::getline`。
+`TERM=dumb`、未设置或清空 `TERM` 都会禁用两种行编辑器，仍可能出现中文退格
+显示问题；测试内置编辑器时应保留正常的终端设置。
+
+### 运行测试
+
+测试需要 `BUILD_TESTING=ON`。CTest 只运行测试，不会编译程序；修改源码或配置后，
+先完成构建再运行测试。CPU 构建：
+
+```bash
+cmake --build build -j4
+ctest --test-dir build --output-on-failure -j4
+```
+
+CUDA 测试共用 GPU，建议串行执行：
+
+```bash
+cmake --build build-cuda -j4
 ctest --test-dir build-cuda --output-on-failure -j1
 ```
 
-`native` 为构建机器可见的 GPU 生成代码；在无 GPU 的机器上编译或为其他 GPU
-构建时，应将其换成目标 GPU 的架构编号。Toolkit 必须支持所选架构，主机编译器
-版本也须与 Toolkit 兼容。
+只运行终端输入回归（Linux/macOS）：
 
-Toolkit 未安装在标准目录时，配置命令还需添加
-`-DCUDAToolkit_ROOT=/实际的/cuda/安装目录` 和
-`-DCMAKE_CUDA_COMPILER=/实际的/cuda/安装目录/bin/nvcc`，将路径替换为实际值。
-使用其他 CUDA 编译器时，通过 `CMAKE_CUDA_COMPILER` 指定兼容版本。
-更换工具链时请使用新的构建目录，避免沿用旧配置。
-运行时还需要驱动及 CUDA Runtime/cuBLAS 动态库。
+```bash
+ctest --test-dir build --output-on-failure -R '^terminal-input$'
+```
 
-部分测试需要可用 GPU、真实聊天模型或 NumPy，缺少前提时会跳过；CPU 构建中的
-CUDA 设备测试也会跳过。请结合 CTest 的跳过信息判断实际执行范围。
-工具链与编辑器配置见[后端与 CUDA Runtime](docs/backend_selection_cuda_runtime_implementation.md)。
+该测试通过真实 PTY 检查中文退格、光标移动、跨行重绘、终端状态恢复和重定向
+输入；构建启用了哪种编辑器，就验证哪种编辑器。可先按上一节禁用 libedit，
+再运行此测试验证内置编辑器。
+
+部分测试有额外前提：
+
+| 测试类型 | 缺少前提时的行为 |
+| --- | --- |
+| CUDA 设备测试 | 未启用 CUDA 后端或无可用 GPU 时跳过 |
+| 真实模型相关测试 | 缺少相应模型时跳过；聊天模型准备见下文 |
+| `golden-logits` | 缺少 NumPy 时跳过；Ubuntu/Debian 可安装 `python3-numpy` |
+
+请检查测试输出中的跳过信息，确认实际执行范围；CTest 通过不代表所有 GPU 或
+真实模型用例均已执行。更多 CUDA 验证说明见
+[后端与 CUDA Runtime](docs/backend_selection_cuda_runtime_implementation.md)。
+
+### 常见配置问题
+
+| 现象 | 处理方式 |
+| --- | --- |
+| `Failed to find nvcc` | 确认 Toolkit 已安装，设置其 `bin` 目录到 `PATH`，必要时指定 `CUDAToolkit_ROOT` 和 CUDA 编译器 |
+| `unsupported GNU version` | 为 `nvcc` 指定受支持的主机编译器，或选择与 Toolkit 兼容的 Clang；例如 CUDA 12.3 的 `nvcc` 不支持 GCC 13 |
+| `No CUDA devices found`、`sm_No` | 检查配置环境的 GPU 访问权限；无法使用 `native` 时显式指定正确的架构编号 |
+| 修改编译器后仍使用旧配置 | 使用新构建目录，或用 `--fresh` 加上完整配置重新生成缓存 |
 
 ## 模型准备与终端聊天
 
