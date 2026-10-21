@@ -2,7 +2,7 @@
 """Exercise UTF-8 input and visible erasure through a real POSIX PTY.
 
 Runs the production chat entry point with the tiny model fixture.
-The small screen model covers the cursor/erase sequences emitted by libedit
+The small screen model covers the cursor/erase sequences emitted by both editors
 with TERM=xterm; it checks screen cells, rather than just the submitted bytes.
 """
 
@@ -14,6 +14,7 @@ import os
 import pty
 import re
 import select
+import signal
 import struct
 import subprocess
 import termios
@@ -63,6 +64,12 @@ class Screen:
                     first = 0 if values[0] in (1, 2) else self.column
                     last = self.column + 1 if values[0] == 1 else self.columns
                     self.rows[self.row][first:last] = [" "] * (last - first)
+                elif command == "J" and values[0] == 0:
+                    self.rows[self.row][self.column:] = [" "] * (
+                        self.columns - self.column
+                    )
+                    for row in range(self.row + 1, len(self.rows)):
+                        self.rows[row] = [" "] * self.columns
                 elif command not in ("m", "h", "l"):
                     raise AssertionError(f"unsupported terminal sequence: {match[0]!r}")
             elif char == "\r":
@@ -99,6 +106,9 @@ class Session:
         self.process = subprocess.Popen(
             command, stdin=slave, stdout=slave, stderr=subprocess.DEVNULL,
             env={**os.environ, "TERM": "xterm", "LC_ALL": locale},
+            # libedit forwards terminal signals to its process group. Keep the
+            # application in its own session so that cannot interrupt this test.
+            start_new_session=True,
         )
         os.close(slave)
         self.wait_for(PROMPT.encode())
@@ -145,12 +155,16 @@ def check_editor(command, columns, text, erase, expected, locale="C.UTF-8", curs
         if erase:
             session.send("\x7f" * erase)
         visible = session.screen.visible()
-        assert visible == (PROMPT + expected).rstrip(), repr(visible)
+        expected_screen = Screen(columns)
+        expected_screen.feed((PROMPT + expected).encode())
+        assert visible == expected_screen.visible(), repr(visible)
         cursor_text = expected if cursor_text is None else cursor_text
-        total_columns = len(PROMPT) + sum(
-            2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in cursor_text
-        )
-        assert (session.screen.row, session.screen.column) == divmod(total_columns, columns)
+        cursor_screen = Screen(columns)
+        cursor_screen.feed((PROMPT + cursor_text).encode())
+        cursor_row, cursor_column = cursor_screen.row, cursor_screen.column
+        if cursor_column == columns:
+            cursor_row, cursor_column = cursor_row + 1, 0
+        assert (session.screen.row, session.screen.column) == (cursor_row, cursor_column)
         # Submit a real chat command to verify the edited buffer as well as its echo.
         # Empty input must be fully erased; preserved Chinese text is cleared with
         # End + Ctrl-U before submitting /params, avoiding model inference.
@@ -164,8 +178,19 @@ def check_editor(command, columns, text, erase, expected, locale="C.UTF-8", curs
         assert session.process.wait(timeout=5) == 0
         # Editor teardown must restore canonical input and echo.
         after = termios.tcgetattr(session.master)
-        mask = termios.ICANON | termios.ECHO
-        assert after[3] & mask == session.settings[3] & mask
+        assert after == session.settings, (after, session.settings)
+    finally:
+        session.close()
+
+
+def check_signal_restoration(command, exit_signal):
+    session = Session(command, 80)
+    try:
+        session.send("你好世界")
+        session.process.send_signal(exit_signal)
+        assert session.process.wait(timeout=5) == -exit_signal
+        after = termios.tcgetattr(session.master)
+        assert after == session.settings, (after, session.settings)
     finally:
         session.close()
 
@@ -181,10 +206,18 @@ def main():
     check_editor(command, 18, "你好世界" * 6, 24, "")
     check_editor(command, 80, "你好世界", 2, "你好")
     check_editor(command, 80, "你好世界", 4, "", locale="C")
+    check_editor(command, 80, "你好\b", 0, "你")
+    check_editor(command, 18, "你好世界" * 6, 2, "你好世界" * 5 + "你好")
     # Left arrow, deletion and insertion operate on characters rather than bytes.
     check_editor(command, 80, "你好世界\x1b[D\x7f天", 0, "你好天界", cursor_text="你好天")
     check_editor(command, 80, "/par你好ms\x1b[D\x1b[D\x7f\x7fa", 0,
                  "/params", cursor_text="/para")
+    check_editor(command, 80, "/params你\x1b[H\x1b[F\x1b[D\x1b[3~", 0,
+                 "/params")
+    check_editor(command, 80, "/par你ams\x01" + "\x1b[C" * 4 + "\x04", 0,
+                 "/params", cursor_text="/par")
+    check_signal_restoration(command, signal.SIGINT)
+    check_signal_restoration(command, signal.SIGTERM)
     result = subprocess.run(
         command, input="\n/params\n/exit".encode(), capture_output=True, check=True,
     )

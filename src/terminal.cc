@@ -1,21 +1,35 @@
 #include "mini_llama/terminal.h"
 
+#include <algorithm>
+#include <cerrno>
+#include <climits>
+#include <cwchar>
 #include <iomanip>
 #include <iostream>
 #include <istream>
-#include <memory>
 #include <ostream>
 #include <stdexcept>
 #include <string>
 
-#ifdef MINI_LLAMA_USE_LIBEDIT
-#include <histedit.h>
+#if defined(__unix__) || defined(__APPLE__)
 #include <langinfo.h>
 #include <locale.h>
 #include <unistd.h>
 
-#include <cstdio>
 #include <cstdlib>
+
+#ifndef MINI_LLAMA_USE_LIBEDIT
+#include <poll.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#endif
+#endif
+
+#ifdef MINI_LLAMA_USE_LIBEDIT
+#include <histedit.h>
+
+#include <cstdio>
 #endif
 
 #include "mini_llama/chat.h"
@@ -26,8 +40,8 @@ namespace mini_llama {
 namespace {
 constexpr char kUserPrompt[] = "mini-llama > ";
 
-#ifdef MINI_LLAMA_USE_LIBEDIT
-// libedit 使用调用线程的 LC_CTYPE；避免改变其他线程的数字或字符格式。
+#if defined(__unix__) || defined(__APPLE__)
+// 行编辑使用调用线程的 LC_CTYPE；避免改变其他线程的数字或字符格式。
 class EditorLocale {
  public:
   EditorLocale() {
@@ -63,6 +77,275 @@ class EditorLocale {
   locale_t previous_ = nullptr;
 };
 
+#ifndef MINI_LLAMA_USE_LIBEDIT
+
+volatile sig_atomic_t input_signal = 0;
+constexpr int kSignals[] = {SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGTSTP};
+
+void OnInputSignal(int signal) { input_signal = signal; }
+
+struct InputSignal {
+  int number;
+};
+
+// 只在一轮交互输入期间接管终端，正常返回、异常和上述信号退出均恢复原设置。
+class InputMode {
+ public:
+  InputMode() {
+    if (tcgetattr(STDIN_FILENO, &original_) != 0) {
+      throw std::runtime_error("Terminal: cannot read terminal settings");
+    }
+    input_signal = 0;
+    struct sigaction action {};
+    action.sa_handler = OnInputSignal;
+    sigemptyset(&action.sa_mask);
+    for (int signal : kSignals) {
+      if (sigaction(signal, &action, &previous_[installed_]) != 0) {
+        Restore();
+        throw std::runtime_error("Terminal: cannot install signal handler");
+      }
+      ++installed_;
+    }
+    termios settings = original_;
+    settings.c_iflag &= ~(IXON | ICRNL | INLCR | IGNCR | ISTRIP);
+    settings.c_lflag &= ~(ICANON | ECHO | ECHONL | IEXTEN);
+    settings.c_cc[VMIN] = 1;
+    settings.c_cc[VTIME] = 0;
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &settings) != 0) {
+      Restore();
+      throw std::runtime_error("Terminal: cannot configure terminal input");
+    }
+    active_ = true;
+  }
+
+  ~InputMode() { Restore(); }
+  InputMode(const InputMode&) = delete;
+  InputMode& operator=(const InputMode&) = delete;
+
+ private:
+  void Restore() {
+    if (active_) {
+      while (tcsetattr(STDIN_FILENO, TCSANOW, &original_) != 0 && errno == EINTR) {
+      }
+      active_ = false;
+    }
+    while (installed_ > 0) {
+      --installed_;
+      sigaction(kSignals[installed_], &previous_[installed_], nullptr);
+    }
+  }
+
+  termios original_{};
+  struct sigaction previous_[sizeof(kSignals) / sizeof(kSignals[0])]{};
+  size_t installed_ = 0;
+  bool active_ = false;
+};
+
+// -1 表示 EOF，-2 表示转义序列等待超时。轮询也避免信号恰好在 read 前
+// 到达时无限等待；信号处理函数只写 sig_atomic_t，不执行终端或流操作。
+int ReadByte(int timeout_ms = -1) {
+  for (;;) {
+    if (input_signal != 0) throw InputSignal{input_signal};
+    pollfd descriptor{STDIN_FILENO, POLLIN, 0};
+    const int ready = poll(&descriptor, 1, timeout_ms < 0 ? 100 : timeout_ms);
+    if (input_signal != 0) throw InputSignal{input_signal};
+    if (ready < 0) {
+      if (errno == EINTR) continue;
+      throw std::runtime_error("Terminal: cannot wait for input");
+    }
+    if (ready == 0) {
+      if (timeout_ms >= 0) return -2;
+      continue;
+    }
+    unsigned char byte;
+    const ssize_t count = read(STDIN_FILENO, &byte, 1);
+    if (count == 1) return byte;
+    if (count == 0) return -1;
+    if (errno != EINTR) throw std::runtime_error("Terminal: cannot read input");
+  }
+}
+
+std::string Encode(wchar_t character) {
+  char bytes[MB_LEN_MAX];
+  std::mbstate_t state{};
+  const size_t count = std::wcrtomb(bytes, character, &state);
+  if (count == static_cast<size_t>(-1)) return "?";
+  return std::string(bytes, count);
+}
+
+size_t Previous(const std::wstring& text, size_t cursor) {
+  if (cursor == 0) return 0;
+  --cursor;
+  while (cursor > 0 && wcwidth(text[cursor]) == 0) --cursor;
+  return cursor;
+}
+
+size_t Next(const std::wstring& text, size_t cursor) {
+  if (cursor == text.size()) return cursor;
+  ++cursor;
+  while (cursor < text.size() && wcwidth(text[cursor]) == 0) ++cursor;
+  return cursor;
+}
+
+// 不依赖字节数推断光标位置；宽字符按显示列布局，并显式处理行末换行。
+class InputDisplay {
+ public:
+  explicit InputDisplay(std::ostream& output) : output_(output) {}
+
+  void Draw(const char* prompt, const std::wstring& text, size_t cursor) {
+    winsize window{};
+    const int columns =
+        ioctl(STDOUT_FILENO, TIOCGWINSZ, &window) == 0 && window.ws_col > 0
+            ? window.ws_col
+            : 80;
+    output_ << '\r';
+    if (cursor_row_ > 0) output_ << "\x1b[" << cursor_row_ << 'A';
+    output_ << "\x1b[J";
+    int row = 0, column = 0;
+    auto put = [&](wchar_t character) {
+      const int width = std::max(0, wcwidth(character));
+      if (column + width > columns) {
+        output_ << "\r\n";
+        ++row;
+        column = 0;
+      }
+      output_ << Encode(character);
+      column += width;
+      if (column >= columns) {
+        output_ << "\r\n";
+        ++row;
+        column = 0;
+      }
+    };
+    for (const char* p = prompt; *p != '\0'; ++p) put(*p);
+    int target_row = row, target_column = column;
+    for (size_t i = 0; i < text.size(); ++i) {
+      put(text[i]);
+      if (i + 1 == cursor) {
+        target_row = row;
+        target_column = column;
+      }
+    }
+    output_ << '\r';
+    if (row > target_row) output_ << "\x1b[" << row - target_row << 'A';
+    if (target_column > 0) output_ << "\x1b[" << target_column << 'C';
+    output_.flush();
+    cursor_row_ = target_row;
+  }
+
+ private:
+  std::ostream& output_;
+  int cursor_row_ = 0;
+};
+
+void EscapeKey(const std::wstring& text, size_t* cursor, size_t* erase) {
+  const int prefix = ReadByte(50);
+  if (prefix != '[' && prefix != 'O') return;
+  std::string key;
+  for (int i = 0; i < 16; ++i) {
+    const int byte = ReadByte(50);
+    if (byte < 0) return;
+    key += static_cast<char>(byte);
+    if ((byte >= 'A' && byte <= 'Z') || byte == '~') break;
+  }
+  if (key == "D") *cursor = Previous(text, *cursor);
+  if (key == "C") *cursor = Next(text, *cursor);
+  if (key == "H" || key == "1~" || key == "7~") *cursor = 0;
+  if (key == "F" || key == "4~" || key == "8~") *cursor = text.size();
+  if (key == "3~") *erase = Next(text, *cursor) - *cursor;
+}
+
+bool ReadTerminalInput(const char* prompt, std::string* line, std::ostream& output) {
+  line->clear();
+  std::wstring text;
+  size_t cursor = 0;
+  for (;;) {
+    try {
+      InputMode mode;
+      InputDisplay display(output);
+      std::mbstate_t decoder{};
+      display.Draw(prompt, text, cursor);
+      for (;;) {
+        const int byte = ReadByte();
+        if (byte < 0 || byte == '\r' || byte == '\n' ||
+            (byte == 4 && text.empty())) {
+          display.Draw(prompt, text, text.size());
+          output << "\r\n";
+          output.flush();
+          if ((byte < 0 || byte == 4) && text.empty()) return false;
+          for (wchar_t character : text) *line += Encode(character);
+          return true;
+        }
+        size_t erase = 0;
+        if (byte < 32 || byte == 127) {
+          decoder = {};
+          switch (byte) {
+            case 1:
+              cursor = 0;
+              break;  // Ctrl-A
+            case 2:
+              cursor = Previous(text, cursor);
+              break;
+            case 3:
+              throw InputSignal{SIGINT};
+            case 4:
+              erase = Next(text, cursor) - cursor;
+              break;
+            case 5:
+              cursor = text.size();
+              break;  // Ctrl-E
+            case 6:
+              cursor = Next(text, cursor);
+              break;
+            case 8:
+            case 127: {
+              const size_t previous = Previous(text, cursor);
+              erase = cursor - previous;
+              cursor = previous;
+              break;
+            }
+            case 11:
+              erase = text.size() - cursor;
+              break;  // Ctrl-K
+            case 21:
+              erase = cursor;
+              cursor = 0;
+              break;  // Ctrl-U
+            case 26:
+              throw InputSignal{SIGTSTP};
+            case 27:
+              EscapeKey(text, &cursor, &erase);
+              break;
+          }
+          text.erase(cursor, erase);
+        } else {
+          const char input = static_cast<char>(byte);
+          wchar_t character;
+          const size_t count = std::mbrtowc(&character, &input, 1, &decoder);
+          if (count == static_cast<size_t>(-2)) continue;
+          if (count == static_cast<size_t>(-1)) {
+            decoder = {};
+            continue;
+          }
+          if (wcwidth(character) < 0) continue;
+          text.insert(cursor++, 1, character);
+        }
+        display.Draw(prompt, text, cursor);
+      }
+    } catch (const InputSignal& signal) {
+      // InputMode 已恢复 termios 和原处理器，再交还信号的默认/原有行为。
+      raise(signal.number);
+      if (signal.number != SIGTSTP) return false;
+      output << "\r\n";
+    }
+  }
+}
+
+#endif
+
+#endif
+
+#ifdef MINI_LLAMA_USE_LIBEDIT
 const char* EditorPrompt(EditLine* editor) {
   void* data = nullptr;
   el_get(editor, EL_CLIENTDATA, &data);
@@ -77,7 +360,7 @@ Terminal::Terminal(std::istream& input, std::ostream& output)
     : input_(&input), output_(&output) {}
 
 bool Terminal::UsesLineEditor() const {
-#ifdef MINI_LLAMA_USE_LIBEDIT
+#if defined(__unix__) || defined(__APPLE__)
   const char* term = std::getenv("TERM");
   return input_ == &std::cin && output_ == &std::cout && isatty(STDIN_FILENO) &&
          isatty(STDOUT_FILENO) && term != nullptr && term[0] != '\0' &&
@@ -104,14 +387,15 @@ std::string Terminal::ReadLine() const {
 
 bool Terminal::ReadLine(std::string* line) const {
   if (line == nullptr) return false;
-#ifdef MINI_LLAMA_USE_LIBEDIT
+#if defined(__unix__) || defined(__APPLE__)
   if (UsesLineEditor()) {
     EditorLocale locale;
+    const char* prompt = prompt_pending_ ? kUserPrompt : "";
+    prompt_pending_ = false;
+#ifdef MINI_LLAMA_USE_LIBEDIT
     std::unique_ptr<EditLine, decltype(&el_end)> editor(
         el_init("mini-llama", stdin, stdout, stderr), &el_end);
     if (!editor) throw std::runtime_error("Terminal: cannot create line editor");
-    const char* prompt = prompt_pending_ ? kUserPrompt : "";
-    prompt_pending_ = false;
     if (el_set(editor.get(), EL_CLIENTDATA, prompt) != 0 ||
         el_set(editor.get(), EL_PROMPT, &EditorPrompt) != 0 ||
         el_set(editor.get(), EL_EDITOR, "emacs") != 0 ||
@@ -128,6 +412,9 @@ bool Terminal::ReadLine(std::string* line) const {
     line->assign(text, static_cast<size_t>(count));
     if (!line->empty() && line->back() == '\n') line->pop_back();
     return true;
+#else
+    return ReadTerminalInput(prompt, line, *output_);
+#endif
   }
 #endif
   return static_cast<bool>(std::getline(*input_, *line));
